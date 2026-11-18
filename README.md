@@ -22,6 +22,23 @@
 3. `if item_id == (99 or 10 or 20 or 30)` 逻辑错误（只等于 99）。
 4. 香蕉放置分支缺失。
 
+## A 组（视觉感知）改动 · 2026-11-18
+
+详见 [`auto_match_25/auto_match/docs/vision_module.md`](auto_match_25/auto_match/docs/vision_module.md)。
+
+- `detect_ros.py` 重写：阈值/模型/推理参数改由 `config/items_config.yaml` 的 `detect` 段控制，
+  加帧率上限、错误不再静默吞掉；`/objects` 话题契约不变。
+- 新增 `nodes/board_mapping.py`（纯逻辑）+ `nodes/board_classifier.py`（ROS 节点）：
+  把分类板的「图案 → B/C/D 放置区」独立成节点，发布 `/board_mapping`，不再挤在 `runtask.py` 里。
+- `runtask.py` 只加了 6 处对接（初始化 `self.mapping`、到分类区后取一次映射、兜底放置区），
+  并修正 `item_id == (99 or 10 or 20 or 30)` → `item_id in (10, 20, 30, 40, 99)`。
+- 新增单元测试 `test/test_board_mapping.py`（不需要 ROS / 相机 / 模型）：
+  `cd auto_match_25/auto_match && python3 -m unittest discover -s test -v`
+- 新节点记得 `chmod +x nodes/board_classifier.py nodes/board_mapping.py`，否则 `launch` 的 `type=` 找不到。
+
+> 上面「已知问题」第 2、3 条已处理；第 1 条（模型缺失）现在会在启动时明确报错退出，
+> 第 4 条（香蕉放置分支）属于 D 组范围。
+
 ## 环境
 
 - 机器人：Spark-H（借用），Ubuntu 20.04 + ROS Noetic

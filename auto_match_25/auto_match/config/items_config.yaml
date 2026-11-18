@@ -1,3 +1,10 @@
+# ============================================================
+# 物品 / 识别 / 分类板 配置
+# 负责人：A（视觉感知）  维护：detect_ros.py、board_classifier.py
+# 其它模块只读，不要改；改阈值请只改本文件，不要改 .py
+# ============================================================
+
+# 类别名 -> 下发 ID（下游 runtask 用这个 ID 判断物品类型）
 items:
   bear: 1
   wine: 2
@@ -8,8 +15,67 @@ items:
   base: 99
   banana: 4
   banana_site: 40
+
+# 四个目标物品的类别名（runtask 按 a/b/c/d 顺序取 search_id）
 objects:
   objects_a: clock
   objects_b: bear
   objects_c: wine
   objects_d: banana
+
+# ============================ 检测 ============================
+detect:
+  # 模型路径，允许 ~ / $HOME；两个模型都会跑，结果合并
+  model_auto: ~/auto.pt
+  model_banana: ~/banana.pt
+
+  # 置信度：低于该值的框直接丢弃
+  conf_thres: 0.5
+  # 按类别单独覆盖置信度（例如分类板上的小图案可以放低），留空表示不覆盖
+  # 例： class_conf: {bear: 0.6, clock: 0.55}
+  class_conf: {}
+
+  # YOLOv5 推理参数
+  augment: true          # 原代码为 True；想提速度先把它改 false（精度不够再改回来）
+  iou_thres: 0.45
+  img_size: 640
+
+  # 处理帧率上限（Hz）。相机一般 30Hz，双模型推理跟不上，
+  # 用这个值主动丢帧，避免消息积压导致 /objects 延迟越来越大。
+  max_rate_hz: 8.0
+
+  # 是否发布 /debug_image（画框后的图）。比赛时可关掉省带宽。
+  publish_debug_image: true
+
+  # 这些 ID 不发布到 /objects（场地标记/底板）。留空 = 全部发布（与旧行为一致）
+  filter_ids: []
+
+# =========================== 分类板 ===========================
+# 分类板：三个格子从左到右对应 B/C/D 三个放置区。
+# 板上的图案类别由 detect_ros 识别成 ID 后，由 board_classifier 节点换成映射。
+board:
+  enabled: true
+
+  # 三个格子从左到右对应的放置区（顺序不能乱）
+  zones: [Collection_B, Collection_C, Collection_D]
+
+  # 一帧里至少要识别到几个才认为是完整的分类板
+  expect_num: 3
+
+  # 连续多少帧结果一致才认为稳定（相机抖动/误检的过滤，1 = 不过滤）
+  stable_frames: 3
+
+  # 两个框中心 x 距离小于该像素值视为同一个物体，去重
+  x_tolerance: 30
+
+  # 这些 ID 出现在分类板区域时忽略（场地标记/底板）
+  ignore_ids: [10, 20, 30, 40, 99]
+
+  # 单帧最长等待时间（秒）；超时打印 warn 但不退出
+  frame_timeout: 5.0
+
+  # 稳定后是否周期性重发（秒），0 = 不重发（靠 latch）
+  republish_period: 2.0
+
+# 分类板识别失败/超时时的兜底放置区（A 只提供，是否使用由 D 决定）
+board_fallback_zone: Collection_B

@@ -35,6 +35,10 @@
 		<remap from="image" to="/camera/rgb/image_raw" if="$(eval arg('camera_type_tel')=='astra')"/>
 	</node>
 
+	<!-- 分类板识别（A 组）：把 /objects 里的图案换成 物品ID -> Collection_B/C/D 映射，
+	     结果发布在 /board_mapping（latched），runtask.py 订阅使用 -->
+	<node pkg="auto_match" name="board_classifier" type="board_classifier.py" output="screen"/>
+
 	<!-- 地点记录 -->
 	<node pkg="auto_match" name="mark_move" type="mark_move.py" output="screen"/>
 	

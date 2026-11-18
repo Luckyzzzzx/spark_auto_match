@@ -6,6 +6,7 @@ import yaml
 import _thread
 import threading
 import pickle
+import json
 
 import rospy
 import rospkg
@@ -662,6 +663,12 @@ class AutoAction:
         self.CLOCK_ID  = 3      # clock
         self.CUP_ID    = 2      # wine glass
 
+        # ==== 分类板映射（由 A 组 board_classifier.py 发布到 /board_mapping）====
+        # D 组只订阅、不改识别逻辑；识别失败时退回 items_config.yaml 的 board_fallback_zone
+        self.mapping = {}
+        self.board_timeout = 10.0
+        self.default_zone = self._load_fallback_zone()
+
         # 订阅任务控制指令的话题
         self.task_cmd_sub = rospy.Subscriber("/task_start_flag", String, self.task_cmd_cb) # 订阅任务开始与否信号
         self.task_run_th = threading.Thread(target=lambda: "pass") # 创建线程对象
@@ -701,6 +708,8 @@ class AutoAction:
         # # ===== 导航到分类区 =====
         if self.robot.goto_local("Classification_area"):
             rospy.sleep(2)
+            # 分类板识别：A 的 board_classifier 在跑就能拿到，最多等 board_timeout 秒
+            self.mapping = self.wait_board_mapping()
         if self.robot.goto_local("Collection_A"):
             rospy.sleep(2)
       
@@ -798,7 +807,7 @@ class AutoAction:
                 drop_zone = "Collection_A"   # 香蕉固定 A
             elif item_type != self.BANANA_ID:
                 # 用分类板识别的结果，找对应放置区
-                drop_zone = self.mapping.get(item_type, "Collection_B") 
+                drop_zone = self.mapping.get(item_type, self.default_zone) 
             
             if total_drop_times != 9:
                 print("========向后退一点===== ")
@@ -890,6 +899,32 @@ class AutoAction:
         rospy.logwarn("Re-send a message to hm_task_cmd topic. ")
         rospy.logwarn("Or press Ctrl+C to exit the program")
         
+    def _load_fallback_zone(self):
+        '''读取兜底放置区（分类板识别失败时使用）。'''
+        try:
+            path = os.path.join(rospkg.RosPack().get_path('auto_match'), 'config', 'items_config.yaml')
+            with open(path, 'r', encoding='utf8') as f:
+                content = yaml.load(f.read(), Loader=yaml.FullLoader) or {}
+            return str(content.get('board_fallback_zone', 'Collection_B'))
+        except Exception as exc:
+            rospy.logwarn(f"读取兜底放置区失败({exc})，使用 Collection_B")
+            return 'Collection_B'
+
+    def wait_board_mapping(self):
+        '''
+        等分类板识别结果（A 组 board_classifier.py 发布在 /board_mapping）。
+        @return {item_id: 'Collection_X'}；超时或解析失败返回 {}，调用处会退回 default_zone
+        '''
+        try:
+            msg = rospy.wait_for_message("/board_mapping", String, timeout=self.board_timeout)
+            payload = json.loads(msg.data)
+            mapping = {int(k): str(v) for k, v in payload.get("mapping", {}).items()}
+            rospy.loginfo(f"分类板映射: {mapping}")
+            return mapping
+        except Exception as exc:
+            rospy.logwarn(f"分类板识别失败({exc})，本场使用兜底放置区 {self.default_zone}")
+            return {}
+
     def detect_classification_board(self): 
         rospy.loginfo("开始检测分类版图案...")
 
@@ -907,7 +942,7 @@ class AutoAction:
             objs = []
             for obj in obj_array.detections:
                 item_id = obj.results[0].id
-                if item_id == (99 or 10 or 20 or 30):  
+                if item_id in (10, 20, 30, 40, 99):  # 场地标记/底板，不参与分类板映射  
                     continue
                 item_x = obj.bbox.center.x
                 objs.append((item_id, item_x))
