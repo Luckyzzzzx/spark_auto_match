@@ -1,0 +1,22 @@
+# Replacement robot 10.25.141.8, measured 2026-11-22
+# One-point anchored mapping. Retains the existing thefile2 slopes and shifts
+# the intercepts so the verified cake center maps to the suction-cup TCP.
+camera_pixel_center:
+  u: 317.86
+  v: 103.46
+verified_suction_contact_mm:
+  x: 315.50
+  y: 21.33
+  z: 62.43
+mapping_same_height_only:
+  x_from_v: "x = -0.8510461976438224 * (v - 103.46) + 315.50"
+  y_from_u: "y = -0.8945605188027759 * (u - 317.86) + 21.33"
+lift_verified_mm:
+  x: 315.53
+  y: 21.33
+  z: 105.04
+status: provisional_one_point_anchor
+notes:
+  - Use only for targets at the same second-layer height and unchanged camera pose.
+  - Collect at least two more separated center points before replacing thefile2.txt.
+  - Calibrate first-layer targets separately because their z plane differs.

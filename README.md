@@ -14,6 +14,8 @@
 - `auto_match_25/spark_alignment_mark/` — AR 码对齐节点
 - `auto_match_25/spark_move/` — 直行 / 转向控制
 - `tools/` — 标定数据（`thefile.txt` / `thefile2.txt`）与桌面工具脚本
+  - `tools/c_calibration/` — C 组新机器人相机取帧、蛋糕顶面四角与机械臂真实串口反馈工具；二层抓取仍需实测标定
+  - `tools/c_vision/` — C 组蛋糕数据构建、模型训练审计、ROS 检测与 RGB-D 顶面几何工具
 
 ## 导航模块（B 负责）
 
