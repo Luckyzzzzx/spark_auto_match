@@ -1,5 +1,24 @@
 # 变更日志
 
+## 2026-11-23 · A组（视觉）· 按机器人实测环境修正
+
+### 背景（`10.24.170.0` 巡检结论）
+- `~/auto.pt`、`~/banana.pt` 是 **YOLOv5** 权重，`ultralytics 8.x` 拒绝加载（"NOT forwards compatible"）；
+- `~/yolov8n.pt` 不存在 → 原配置 `backend: ultralytics + model_auto: ~/yolov8n.pt` 等于没有模型；
+- `~/yolo_venv` 不存在 → `run_detect_ros.sh` 直接 `exit 2`，视觉链路整体起不来；
+- 系统 `python3` 3.8.10 已装 `ultralytics 8.0.143` + `yolov5 7.0.13` + `torch 2.0.1`（CPU），不需要 venv；
+- 蛋糕权重 `cake_dataset_v4_20261122/.../best.pt` 是 YOLOv8、单类 `cake`，可加载但未接入主链路。
+
+### 修复
+- `config/items_config.yaml`：`detect.backend` 改 `yolov5`，`model_auto: ~/auto.pt`、`model_banana: ~/banana.pt`。
+- `scripts/run_detect_ros.sh`：解释器改成「显式变量 → `~/yolo_venv` → 系统 python3」回退链，
+  并加后端自检（`ultralytics`/`yolov5` 都没有则 `exit 3`），不再因为缺 venv 直接退出。
+- `docs/vision_module.md`：新增「机器人实测环境」与「部署到机器人」两节。
+
+### 部署
+- 已按上表把视觉相关文件同步到 `~/spark_noetic/src/3rd_app/auto_match_25/auto_match`（先整包备份），
+  未改动 `runtask.py` / `nav_manager.py`（依赖 B 组点位）。
+
 ## 2026-11-19 · 自动组（B 导航 / D 调度）
 
 ### 修复

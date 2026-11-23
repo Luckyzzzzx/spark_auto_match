@@ -33,20 +33,25 @@ objects:
 
 # ============================ 检测 ============================
 detect:
-  # 推理后端：机器人现有 yolo_venv 使用 Ultralytics YOLOv8。
-  # 若以后恢复旧版 yolov5 包和自定义权重，可改成 yolov5。
-  backend: ultralytics
+  # 推理后端：ultralytics / yolov5
+  # 【2026-11-23 实测 10.24.170.0】机器人上现有权重 ~/auto.pt、~/banana.pt 是 **YOLOv5** 训练的，
+  # ultralytics 8.x 会直接拒绝加载（"NOT forwards compatible with YOLOv8"），
+  # 而 ~/yolov8n.pt 并不存在。系统 python3 同时装了 yolov5 7.0.13 与 ultralytics 8.0.143，
+  # 所以这里用 yolov5 后端跑自训练权重；等重训出 YOLOv8 权重再改回 ultralytics（一行）。
+  backend: yolov5
 
   # 模型路径，允许 ~ / $HOME；非空模型都会运行，结果合并。
-  # 当前机器人只有 ~/yolov8n.pt。正式比赛仍建议换成实际场景训练的 best.pt。
-  model_auto: ~/yolov8n.pt
-  model_banana: null
+  model_auto: ~/auto.pt          # 14M，2024 训练，含项目四类
+  model_banana: ~/banana.pt      # 6.4M，2025 训练，香蕉单独一个模型
 
-  # 通用 COCO 模型类别名 -> 项目内部类别名。自定义权重若已经使用右侧名称，可留着不影响。
-  class_aliases:
-    "bear": wild_bear
-    "teddy bear": bear
-    "wine glass": wine
+  # 类别别名：**只在使用 COCO 预训练权重时才有用**（COCO 里玩偶叫 "teddy bear"、酒杯叫 "wine glass"）。
+  # 自训练权重（~/auto.pt、~/banana.pt）的类别名已经是项目内部名，必须留空！
+  # 2026-11-23 实测：留着 "bear": wild_bear 会把玩偶类改名成 wild_bear，
+  #   启动自检直接报「模型缺少 bear」→ 玩偶永远识别不到。
+  # 例（仅 COCO 权重时）：
+  #   "teddy bear": bear
+  #   "wine glass": wine
+  class_aliases: {}
 
   # 置信度：低于该值的框直接丢弃
   conf_thres: 0.5

@@ -39,16 +39,23 @@ self.robot = NavigationManager()   # 原来是 RobotMoveAction()
 
 ## 已知问题（待完善）
 
-1. 机器人当前只有通用 `~/yolov8n.pt`，正式比赛仍需要实际场景数据训练并验证的权重。
-2. 分类板 ROI 需要在分类区停车位确定后填入 `items_config.yaml`。
-3. 当前机器人点位表缺少 `Collection_A`，必须在实际场地补标；完整预检会在补标前阻止自动任务启动。
+1. **机器人上的权重是 YOLOv5 格式**（`~/auto.pt` 7 类：bear/wine/clock + 三个 site + base；`~/banana.pt` 单独管香蕉），
+   `~/yolov8n.pt` 并不存在。因此 `detect.backend` 现为 `yolov5`；要换 Ultralytics 必须先用 YOLOv8 重新训练。
+2. **蛋糕没有可用权重**：`cake_dataset_v4_20261122/runs/cake_v4/weights/best.pt`（单类 `cake`）能加载，
+   但只发布到 `/cake_detections`，主链路 `/objects` 未订阅 → 二层那块目前无法识别。
+3. 分类板 ROI 需要在分类区停车位确定后填入 `items_config.yaml`（当前为空 = 全图扫描，有误映射风险）。
+4. 当前机器人点位表缺少 `Collection_A`，必须在实际场地补标；完整预检会在补标前阻止自动任务启动。
 
-## A 组（视觉感知）改动 · 2026-11-19
+## A 组（视觉感知）改动 · 2026-11-23
 
 详见 [`auto_match_25/auto_match/docs/vision_module.md`](auto_match_25/auto_match/docs/vision_module.md)。
 
 - `detect_ros.py` 重写：阈值/模型/推理参数改由 `config/items_config.yaml` 的 `detect` 段控制，
   同时支持 Ultralytics 与旧版 yolov5，加帧率上限、错误不再静默吞掉；`/objects` 话题契约不变。
+- **按机器人实测环境修正**（2026-11-23 `10.24.170.0` 巡检）：
+  `backend: yolov5` + `model_auto: ~/auto.pt` + `model_banana: ~/banana.pt`；
+  `run_detect_ros.sh` 改为「显式变量 → `~/yolo_venv` → 系统 python3」回退链并加后端自检，
+  不再因为缺 `yolo_venv` 直接 `exit 2`。
 - 新增 `nodes/board_mapping.py`（纯逻辑）+ `nodes/board_classifier.py`（ROS 节点）：
   把分类板的「图案 → B/C/D 放置区」独立成节点；到达分类区后由
   `/board_classifier/capture` 触发新一轮采集，避免读取上一局或路途中的旧结果。
@@ -57,7 +64,8 @@ self.robot = NavigationManager()   # 原来是 RobotMoveAction()
   `cd auto_match_25/auto_match && python3 -m unittest discover -s test -v`
 - 节点执行权限已记录在 Git 中，并在 `CMakeLists.txt` 中使用 `catkin_install_python()`。
 
-> 通用 YOLOv8 权重只用于打通运行链路。识别准确率必须用 D435 实拍数据验证，不能以“节点能启动”代替模型验收。
+> 实机已验证（2026-11-23）：`/objects` 稳定 **约 7.5 Hz**（`max_rate_hz=8` 限帧生效，双模型 CPU 推理跟得上），
+> `/board_classifier/capture` 返回成功。识别**准确率**仍需实际场地数据验收，不能以“节点能启动”代替模型验收。
 
 ## 环境
 

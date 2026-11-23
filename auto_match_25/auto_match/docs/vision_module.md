@@ -2,7 +2,21 @@
 
 > 对应分工表第一行：`detect_ros.py`、`items_config.yaml`、分类板识别（新增）。
 > 依据：《赛项规则拟定版》自动任务赛 + 《夺宝奇兵自动赛-说明文档》
-> 最后更新：2026-11-19（运行环境与分类板采集加固）
+> 最后更新：2026-11-23（按机器人实测环境修正后端与启动脚本）
+
+## 0. 机器人实测环境（2026-11-23 巡检 `10.24.170.0`）
+
+| 项 | 实测值 | 对代码的影响 |
+| --- | --- | --- |
+| Python | `/usr/bin/python3` **3.8.10** | 不需要 venv |
+| 后端包 | `ultralytics 8.0.143`、`yolov5 7.0.13`、`torch 2.0.1+cu117`（**CPU**，无 GPU） | 两个后端都能跑 |
+| `~/yolo_venv` | **不存在** | `run_detect_ros.sh` 旧版会直接 `exit 2` → 已改为回退系统 python3 |
+| 权重 | `~/auto.pt`(14M)、`~/banana.pt`(6.4M) 都是 **YOLOv5** 格式 | `backend: ultralytics` 会报 “NOT forwards compatible” → 改用 `backend: yolov5` |
+| `~/yolov8n.pt` | **不存在** | 原配置指着它，等于没有模型 |
+| 蛋糕权重 | `~/cake_dataset_v4_20261122/runs/cake_v4/weights/best.pt`（YOLOv8，`{0: 'cake'}`） | 可用，但目前只发布到 `/cake_detections`，主链路没订阅 |
+| 现役部署 | `~/spark_noetic/src/3rd_app/auto_match_25/auto_match`（旧版：yolov5 后端、无 `board_classifier.py`） | 仓库新链路尚未部署 |
+
+结论：**当前唯一能跑的组合是 `yolov5` 后端 + `auto.pt`/`banana.pt`**，配置已按此调整。
 
 ## 1. 文件与职责
 
@@ -201,7 +215,43 @@ python3 tools/inspect_model.py            # 默认查 ~/yolov8n.pt
 结论里会直接告诉你缺哪类、以及「cake 缺失该怎么临时绕过」。
 
 
-## 10. 和另外三个人怎么不撞车
+## 10. 部署到机器人（无 git，用 scp/rsync）
+
+机器人上**没有**本仓库的工作副本（现役代码是 `~/spark_noetic/src/3rd_app/auto_match_25/auto_match`），
+所以不要指望 `git pull`。部署流程（先备份、只覆盖视觉文件）：
+
+```bash
+HOST=spark@10.24.170.0
+DEST=/home/spark/spark_noetic/src/3rd_app/auto_match_25/auto_match
+BASE=$(date +%Y%m%d_%H%M%S)
+
+# 1) 备份（整包，出事能整体回滚）
+ssh $HOST "cp -a $DEST ~/backup_auto_match_$BASE"
+
+# 2) 只覆盖视觉相关文件
+cd auto_match_25/auto_match
+scp nodes/detect_ros.py nodes/board_mapping.py nodes/board_classifier.py $HOST:$DEST/nodes/
+scp config/items_config.yaml                     $HOST:$DEST/config/
+scp scripts/run_detect_ros.sh                    $HOST:$DEST/scripts/
+scp launch/vision_test.launch                    $HOST:$DEST/launch/
+
+# 3) 补执行位（scp 不带权限位）
+ssh $HOST "chmod +x $DEST/nodes/board_classifier.py $DEST/nodes/board_mapping.py $DEST/scripts/run_detect_ros.sh"
+
+# 4) 验证视觉链路（不启底盘/机械臂）
+ssh $HOST "source /opt/ros/noetic/setup.bash && source ~/spark_noetic/devel/setup.bash && \
+  roslaunch auto_match vision_test.launch start_camera:=true" &
+sleep 12
+ssh $HOST "source /opt/ros/noetic/setup.bash && source ~/spark_noetic/devel/setup.bash && \
+  rosservice call /board_classifier/capture && rostopic hz /objects --window=20" 
+```
+
+回滚：`ssh $HOST "rm -rf $DEST && cp -a ~/backup_auto_match_$BASE $DEST"`
+
+> 只部署视觉文件是**故意**的：`runtask.py` / `nav_manager.py` 依赖 B 组点位（`Collection_A` 仍未标），
+> 整包部署会把别人正在调的导航一起换掉。
+
+## 11. 和另外三个人怎么不撞车
 
 * A 独占：`nodes/detect_ros.py`、`config/items_config.yaml`、`nodes/board_*.py`、`test/`、`docs/vision_module.md`、`tools/inspect_model.py`。
 * `runtask.py` 现在是 8 处改动：6 处分类板对接 + 蛋糕优先（`self.CAKE_ID` / `self.CAKE_FIRST` + 两处判断）。
