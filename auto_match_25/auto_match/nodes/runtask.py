@@ -2,6 +2,7 @@
 
 import sys
 import os
+import math
 import yaml
 import _thread
 import threading
@@ -33,6 +34,9 @@ if NODE_DIR not in sys.path:
     sys.path.insert(0, NODE_DIR)
 
 from nav_manager import NavigationManager
+from task_rules import choose_drop_zone, remaining_seconds, should_stop
+# 堆叠安全运动：分段抬升 / 外侧接近 / IK 自检（见 arm_stack.py 顶部注释）
+from arm_stack import StackMotion, load_config as load_stack_config, layer_z_for
 
 class SwiftProInterface:
     def __init__(self):
@@ -45,17 +49,37 @@ class SwiftProInterface:
             "swiftpro_status_topic", swiftpro.msg.status, queue_size=1)    # 机械臂开关状态发布者
 
 
-    def set_pose(self, x, y, z):
+    def set_pose_nowait(self, x, y, z):
         '''
-        发布机械臂运动位置
+        只下发，不等待（arm_stack 做分段运动时用）
         '''
         pos = position()
         pos.x = x
         pos.y = y
         pos.z = z
-        # rospy.loginfo(f"set pose {x},{y},{z}")
         self.arm_position_pub.publish(pos)
-        rospy.sleep(1)
+
+    def set_pose(self, x, y, z, wait=None):
+        '''
+        发布机械臂运动位置。
+
+        注意：原来固定 rospy.sleep(1)，距离多远都等 1s。uArm 走的 G0 是关节
+        插补，长距离移动常常超过 1s；这时下一条指令到达会让控制器重新规划，
+        末端直接"抄近路"穿过砖堆 —— 现象就是"上升途中撞到别的物体"。
+        这里按距离估算等待时间（开环步进，没有真实位置反馈，只能估）。
+        '''
+        prev = getattr(self, '_last_pose', None)
+        self.set_pose_nowait(x, y, z)
+        self._last_pose = (x, y, z)
+        if wait is not None:
+            rospy.sleep(float(wait))
+            return
+        if prev is None:
+            rospy.sleep(1.0)
+            return
+        dist = math.sqrt(sum((float(b) - float(a)) ** 2 for a, b in zip(prev, (x, y, z))))
+        # 约 220mm/s，下限 0.55s（短动作也要停稳），上限 6s 防止卡死
+        rospy.sleep(max(0.55, min(6.0, dist * 0.0045)))
 
     def set_pump(self, enable:bool):
         '''
@@ -172,6 +196,23 @@ class ArmAction:
         # 创建机械臂控制接口的对象
         self.interface = SwiftProInterface()
 
+        # ===== 堆叠安全运动（config/arm_stack.yaml 里 enabled:false 可整体回退旧行为）=====
+        try:
+            stack_cfg_path = os.path.join(
+                rospkg.RosPack().get_path('auto_match'), 'config', 'arm_stack.yaml')
+        except Exception:
+            stack_cfg_path = None
+        self.stack_cfg = load_stack_config(stack_cfg_path, log=rospy.loginfo)
+        self.stack = StackMotion(self.interface, self.stack_cfg, log=rospy.logwarn)
+        # 每个放置区最近一次放置的机械臂坐标（叠塔时用于挑"塔顶那块"）
+        self.drop_xy = {}
+        rospy.loginfo("堆叠动作: enabled=%s 每段%.0fmm/停%.2fs 抓后抬升%.0fmm 层高表=%s",
+                      self.stack.enabled,
+                      float(self.stack_cfg['step_mm']),
+                      float(self.stack_cfg['step_dwell']),
+                      float(self.stack_cfg['lift_after_grasp']),
+                      self.stack_cfg.get('layer_z'))
+
         self.grasp_status_pub = rospy.Publisher("/grasp_status", String, queue_size=1)
 
 
@@ -222,11 +263,11 @@ class ArmAction:
         
         r2.sleep()
 
-        # 抬起目标方块
+        # 抬起目标方块：分段竖直抬升（单段 +120 走的是弧线，会蹭倒邻块）
         print(f"我把物品抬起来了")
-        self.interface.set_pose(x, y, z + 120)
-        # rospy.sleep(2)
-        # r1.sleep()
+        if not self.stack.lift(x, y, z, float(self.stack_cfg['lift_after_grasp'])):
+            raise RuntimeError(
+                f"grasp: 抬升被拒绝/中断 (x={x:.1f}, y={y:.1f}, z={z:.1f})")
 
         self.grasp_status_pub.publish(String("0"))
 
@@ -282,11 +323,11 @@ class ArmAction:
 
         r2.sleep()
 
-        # 抬起目标方块
+        # 抬起目标方块：原来只抬 +20mm，横移时块底几乎贴着邻块顶面（抬升高度不够）
         print(f"我把物品抬起来了")
-        self.interface.set_pose(x, y, z + 20)
-        # rospy.sleep(2)
-        r1.sleep()
+        if not self.stack.lift(x, y, z, float(self.stack_cfg['lift_after_grasp_cake'])):
+            raise RuntimeError(
+                f"grasp1: 抬升被拒绝/中断 (x={x:.1f}, y={y:.1f}, z={z:.1f})")
 
         self.grasp_status_pub.publish(String("0"))
 
@@ -503,6 +544,97 @@ class ArmAction:
 
         return True
 
+    # ==================================================================
+    # 堆叠放置（新实现，旧 drop/drop1/drop2 保留作回退）
+    # ==================================================================
+    def _layer_z(self, layer, default):
+        '''
+        第 layer 层（0=第一层）放置时的腕部 z。
+        来源优先级：arm_stack.yaml 的 layer_z 表 -> contact_z + layer*brick_h。
+        '''
+        z, src = layer_z_for(self.stack_cfg, layer)
+        rospy.loginfo("第 %d 层放置高度 z=%.1f（来源：%s）", layer + 1, z, src)
+        return float(z)
+
+    def _detected_arm_xy(self, cube_list, kb_x, kb_y):
+        '''把检测框中心换算成机械臂 (x, y)。'''
+        out = []
+        for item in cube_list:
+            ax = kb_x[0] * item[1][1] + kb_x[1]
+            ay = kb_y[0] * item[1][0] + kb_y[1]
+            out.append((ax, ay))
+        return out
+
+    def _choose_drop_xy(self, zone, candidates, fallback, tag):
+        '''
+        选放置点。
+        叠塔时视野里可能同时有几个框（塔顶那块 + 旁边已放好的），原来直接取
+        cube_list[0] 是随机的。这里优先取"离本区上一次放置点最近"的框。
+        '''
+        ref = self.drop_xy.get(zone) if zone else None
+        if not candidates:
+            if ref is not None:
+                rospy.logwarn("%s: 未识别到金砖，沿用本区上次放置点 (%.1f, %.1f)", tag, ref[0], ref[1])
+                return ref
+            rospy.logwarn("%s: 未识别到金砖，回退到固定点 (%.1f, %.1f)", tag, fallback[0], fallback[1])
+            return fallback
+        if ref is None:
+            return candidates[0]
+        best = min(candidates, key=lambda xy: (xy[0] - ref[0]) ** 2 + (xy[1] - ref[1]) ** 2)
+        moved = math.hypot(best[0] - ref[0], best[1] - ref[1])
+        if moved > 120.0:
+            rospy.logwarn("%s: 最近的框离上次放置点 %.0fmm，可能认到别的金砖了，仍按它放", tag, moved)
+        return best
+
+    def _place(self, zone, layer, x, y, z, tag):
+        '''
+        统一放置流程：补开气泵 -> 外侧上方接近 -> 正上方 -> 分段下降
+        -> 松泵 -> 斜向外撤。绝不贴着塔面竖直起（那是把塔扫倒的主因之一）。
+
+        高层目标不可达时（三层塔顶已经贴着臂展上限），按配置退化为"放到地面"，
+        保住这一块的分，而不是硬撞把整座塔推倒。
+        '''
+        self.interface.set_pump(True)     # 下降前确定性开泵（串口重开后可能已失压）
+        rospy.sleep(0.3)
+        if not self.stack.place(x, y, z):
+            if layer > 0 and self.stack_cfg.get('floor_fallback', True):
+                fy = y + float(self.stack_cfg.get('fallback_dy', -110.0))
+                fz = self._layer_z(0, -55.0)
+                rospy.logwarn("%s: 第 %d 层位姿不可达/失败，退化为放到地面 (%.1f, %.1f, %.1f)",
+                              tag, layer + 1, x, fy, fz)
+                if not self.stack.place(x, fy, fz):
+                    raise RuntimeError("%s: 地面退化放置也失败，保持吸持，需人工接管" % tag)
+                x, y = x, fy
+            else:
+                raise RuntimeError("%s: 放置动作被拒绝（IK 不可达或运动中失败）" % tag)
+        if zone:
+            self.drop_xy[zone] = (x, y)
+        self.interface.set_pump(False)
+        rospy.sleep(0.3)
+        self.arm_grasp_ready()
+        self.grasp_status_pub.publish(String("0"))
+        return True
+
+    def drop_layer(self, layer, zone=None, check=False):
+        '''
+        按层放置一个金砖。
+        @param layer: 0=第一层(地面固定点) 1=第二层 2=第三层
+        @param zone:  放置区名（用于记住本区上次放置点）
+        '''
+        if layer <= 0:
+            x, y = 235.0, 0.0
+        elif layer == 1:
+            cand = self._detected_arm_xy(self.cam.detector(), self.x_kb, self.y_kb)
+            x, y = self._choose_drop_xy(zone, cand, (235.0, 0.0), 'drop1')
+        else:
+            cand = self._detected_arm_xy(self.cam.detector(), self.x_kb1, self.y_kb1)
+            x, y = self._choose_drop_xy(zone, cand, (235.0, 0.0), 'drop2')
+
+        default_z = (-55.0, 60.0, 160.0)[min(layer, 2)]
+        z = self._layer_z(layer, default_z)
+        rospy.loginfo("drop_layer(%d): 放到 (%.1f, %.1f, %.1f) 区=%s", layer, x, y, z, zone)
+        return self._place(zone, layer, x, y, z, "drop_layer(%d)" % layer)
+
     def arm_position_reset(self):
         '''
         校准机械臂的坐标系, 机械臂因碰撞导致坐标计算出问题时使用
@@ -701,10 +833,18 @@ class AutoAction:
             raise RuntimeError("缺少必需导航点位: %s；请先标定，禁止启动自动任务" % ", ".join(missing))
 
         # ==== 分类板映射（由 A 组 board_classifier.py 发布到 /board_mapping）====
-        # D 组只订阅、不改识别逻辑；识别失败时退回 items_config.yaml 的 board_fallback_zone
+        # D 组只订阅、不改识别逻辑；识别失败时按物品分散兜底，避免全塞一个区
         self.mapping = {}
         self.board_timeout = 10.0
-        self.default_zone = self._load_fallback_zone()
+        task_cfg = self._load_task_config()
+        self.default_zone = task_cfg['default_zone']
+        self.fallback_zones = task_cfg['fallback_zones']
+        self.time_budget_s = task_cfg['time_budget_s']
+        self.min_remaining_s = task_cfg['min_remaining_s']
+        self.task_deadline = None
+        rospy.loginfo("调度参数: 兜底区=%s 按物品兜底=%s 时间预算=%.0fs 预留=%.0fs",
+                      self.default_zone, self.fallback_zones,
+                      self.time_budget_s, self.min_remaining_s)
 
         # 订阅任务控制指令的话题
         self.task_cmd_sub = rospy.Subscriber("/task_start_flag", String, self.task_cmd_cb) # 订阅任务开始与否信号
@@ -724,6 +864,10 @@ class AutoAction:
 
         # ===== 现在开始执行任务 =====
         rospy.loginfo("start task now.")
+        # 规则：正式比赛 10 分钟，超时放置不得分且每秒扣 2 分 —— 到点必须停止新抓取
+        self.task_deadline = time.time() + self.time_budget_s
+        rospy.loginfo("时间预算 %.0fs，截止时刻约 %.0fs（剩余不足 %.0fs 时停止抓取）",
+                      self.time_budget_s, self.task_deadline, self.min_remaining_s)
         self.arm.arm_grasp_ready()  # 移动机械臂到其他地方
         # ==== 离开起始区,避免在膨胀区域中，导致导航失败 =====
         if not self.robot.step_go(0.3):
@@ -785,6 +929,13 @@ class AutoAction:
                 break
             if not sorting_status_times:
                 rospy.logwarn("所有分拣点已耗尽，提前结束任务")
+                break
+
+            # 时间预算：剩余时间不够再走一轮（导航+抓取+放置）时就停手，把时间留给收尾
+            if should_stop(time.time(), self.task_deadline, self.min_remaining_s):
+                rospy.logwarn("时间预算将尽（剩余 %.0fs < 预留 %.0fs），停止继续抓取，共完成 %d 块",
+                              remaining_seconds(self.task_deadline, time.time()),
+                              self.min_remaining_s, total_drop_times)
                 break
             else:
                 # 就近选点：从上一个放置区(drop_zone)出发，选距离最近的未抓分拣点，减少空跑
@@ -861,14 +1012,18 @@ class AutoAction:
             self.arm.arm_grasp_ready()
             print("========前往放置区===== ")
 
-            if item_type == self.CAKE_ID:
-                drop_zone = "Collection_A"   # 蛋糕固定 A 区（规则硬性要求，且必须第一个放）
-            elif self.CAKE_FIRST and total_drop_times == 0:
+            if self.CAKE_FIRST and total_drop_times == 0 and item_type != self.CAKE_ID:
                 drop_zone = "Collection_A"   # 第一块没认成蛋糕（模型缺 cake 类）也先放 A，避免占用 B/C/D
                 rospy.logwarn(f"第一块未识别为蛋糕(id={item_type})，仍按规则放 A 区")
             else:
-                # 用分类板识别的结果，找对应放置区
-                drop_zone = self.mapping.get(item_type, self.default_zone) 
+                # 蛋糕固定 A -> 分类板映射 -> 按物品兜底（不会把 10 块全塞进一个区）
+                drop_zone = choose_drop_zone(
+                    item_type, self.mapping, self.fallback_zones,
+                    cake_id=self.CAKE_ID, cake_zone="Collection_A",
+                    default_zone=self.default_zone)
+                if item_type != self.CAKE_ID and not (self.mapping or {}).get(item_type):
+                    rospy.logwarn("分类板映射里没有物品 %s，使用兜底区 %s（本场分类板可能没识别出来）",
+                                  item_type, drop_zone)
             
             if total_drop_times != 9:
                 print("========向后退一点===== ")
@@ -901,17 +1056,17 @@ class AutoAction:
 
             if ret:
                 if drop_times[drop_zone] == 0:
-                    self.arm.drop()  # 放下物品
+                    self.arm.drop_layer(0, zone=drop_zone)  # 放下物品（第一层）
                     drop_times[drop_zone] += 1
 
                 elif drop_times[drop_zone] == 1:
-                    self.arm.drop1()  # 放下物品
+                    self.arm.drop_layer(1, zone=drop_zone)  # 放下物品（第二层）
                     drop_times[drop_zone] += 1
 
                 elif drop_times[drop_zone] >= 2:
                     if drop_times[drop_zone] > 2:
-                        rospy.logwarn(f"{drop_zone} 已堆 {drop_times[drop_zone]} 层，继续用二层位姿放置，注意别撞")
-                    self.arm.drop2()  # 放下物品
+                        rospy.logwarn(f"{drop_zone} 已堆 {drop_times[drop_zone]} 层，继续用第三层位姿放置，注意别撞")
+                    self.arm.drop_layer(2, zone=drop_zone)  # 放下物品（第三层）
                     drop_times[drop_zone] += 1
                     
                 self.robot.step_back()  # 后退
@@ -965,16 +1120,39 @@ class AutoAction:
         rospy.logwarn("Re-send a message to hm_task_cmd topic. ")
         rospy.logwarn("Or press Ctrl+C to exit the program")
         
-    def _load_fallback_zone(self):
-        '''读取兜底放置区（分类板识别失败时使用）。'''
+    def _load_task_config(self):
+        '''
+        读取调度参数：兜底放置区、按物品的兜底分区、时间预算。
+        这些都放在 items_config.yaml 的 task 段，改参数不用改代码。
+        '''
+        cfg = {
+            'default_zone': 'Collection_B',
+            'fallback_zones': {},
+            'time_budget_s': 540.0,
+            'min_remaining_s': 90.0,
+        }
         try:
             path = os.path.join(rospkg.RosPack().get_path('auto_match'), 'config', 'items_config.yaml')
             with open(path, 'r', encoding='utf8') as f:
                 content = yaml.load(f.read(), Loader=yaml.FullLoader) or {}
-            return str(content.get('board_fallback_zone', 'Collection_B'))
         except Exception as exc:
-            rospy.logwarn(f"读取兜底放置区失败({exc})，使用 Collection_B")
-            return 'Collection_B'
+            rospy.logwarn(f"读取 task 配置失败({exc})，使用默认值")
+            return cfg
+
+        cfg['default_zone'] = str(content.get('board_fallback_zone', 'Collection_B'))
+        task = content.get('task') or {}
+        cfg['time_budget_s'] = float(task.get('time_budget_s', 540.0))
+        cfg['min_remaining_s'] = float(task.get('min_remaining_s', 90.0))
+
+        # 按物品名配置的兜底区 -> 转成 ID
+        items = content.get('items') or {}
+        by_name = task.get('fallback_by_name') or {}
+        for name, zone in by_name.items():
+            if name in items:
+                cfg['fallback_zones'][int(items[name])] = str(zone)
+            else:
+                rospy.logwarn(f"task.fallback_by_name 里的类别 {name!r} 不在 items 段，已忽略")
+        return cfg
 
     def wait_board_mapping(self):
         '''
