@@ -199,13 +199,22 @@ class SparkDetect:
             source = image_bgr if backend == 'ultralytics' else cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
             if backend == 'ultralytics':
                 try:
-                    output = model.predict(
-                        source=source,
-                        imgsz=self.img_size,
-                        augment=self.augment,
-                        iou=self.iou_thres,
-                        verbose=False,
-                    )[0]
+                    try:
+                        output = model.predict(
+                            source=source,
+                            imgsz=self.img_size,
+                            augment=self.augment,
+                            iou=self.iou_thres,
+                            verbose=False,
+                        )[0]
+                    except TypeError:
+                        # 部分 ultralytics 版本的 fuse() 不接受 verbose，去掉重试
+                        output = model.predict(
+                            source=source,
+                            imgsz=self.img_size,
+                            augment=self.augment,
+                            iou=self.iou_thres,
+                        )[0]
                     names = output.names
                     boxes = [] if output.boxes is None else output.boxes
                 except Exception as exc:
