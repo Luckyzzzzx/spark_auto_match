@@ -22,50 +22,53 @@ DEFAULT_ZONES = ("Collection_B", "Collection_C", "Collection_D")
 def normalize_detections(detections, ignore_ids=(), x_tolerance=0, include_ids=None):
     """把一帧里的检测结果清洗成「从左到右、每格一个」。
 
-    :param detections: 可迭代的 (item_id, center_x, score)。
-                       也接受 (item_id, center_x) 两元组，score 记为 0。
+    :param detections: 可迭代的 (item_id, center_x, score[, w[, h]])。
+                       只给 (item_id, center_x) 也接受，score 记 0、尺寸记 0。
     :param ignore_ids: 需要丢弃的 ID（场地标记、底板等）。
     :param x_tolerance: 中心点 x 距离小于该值视为同一个物体，只留分数最高的。
                         0 表示不做去重。
     :param include_ids: 白名单。给了就只保留这些 ID（分类板上只会出现玩偶/时钟/香蕉）。
                         None 表示不启用白名单。
-    :return: [(item_id, x, score), ...]，按 x 从小到大排序。
+    :return: [(item_id, x, score, w, h), ...]，按 x 从小到大排序。
+             拿不到尺寸时 w/h 为 0（此时尺寸一致性检查自动跳过）。
     """
     ignore = set(ignore_ids or ())
     allow = None if include_ids is None else set(include_ids)
     candidates = []
     for det in detections:
-        if len(det) >= 3:
-            item_id, x, score = det[0], det[1], det[2]
-        else:
-            item_id, x = det[0], det[1]
-            score = 0.0
+        n = len(det)
+        item_id, x = det[0], det[1]
+        score = det[2] if n >= 3 else 0.0
+        w = det[3] if n >= 4 else 0.0
+        h = det[4] if n >= 5 else 0.0
         try:
             item_id = int(item_id)
             x = float(x)
             score = float(score)
+            w = float(w or 0)
+            h = float(h or 0)
         except (TypeError, ValueError):
             continue
         if item_id in ignore:
             continue
         if allow is not None and item_id not in allow:
             continue
-        candidates.append((item_id, x, score))
+        candidates.append((item_id, x, score, w, h))
 
     # 先按分数从高到低，保证同一格只保留最可信的那个
     candidates.sort(key=lambda item: item[2], reverse=True)
 
     kept = []
-    for item_id, x, score in candidates:
+    for item_id, x, score, w, h in candidates:
         duplicated = False
         if x_tolerance and x_tolerance > 0:
-            for _kept_id, kept_x, _kept_score in kept:
+            for _kept_id, kept_x, _kept_score, _kw, _kh in kept:
                 if abs(kept_x - x) <= x_tolerance:
                     duplicated = True
                     break
         if duplicated:
             continue
-        kept.append((item_id, x, score))
+        kept.append((item_id, x, score, w, h))
 
     kept.sort(key=lambda item: item[1])
     return kept
@@ -85,6 +88,29 @@ def gap_uniform_ratio(items, count=3):
     if not gaps or min(gaps) <= 0:
         return 0.0
     return min(gaps) / max(gaps)
+
+
+def size_uniform_ratio(items, count=3):
+    """三格检测框的「尺寸均匀度」 = 最小等效边长 / 最大等效边长。
+
+    分类板三个图案是等大的、并且大致共面，所以正视时框的大小应该接近；
+    而中央 3×3 金砖离相机远近不同、每个框大小差异明显，这条能进一步
+    挡住「把金砖当成分类板」的情况（即使 ROI 还没标定）。
+
+    拿不到尺寸（w/h 为 0）时返回 1.0，表示"无法判断，不拦"。
+    """
+    sides = []
+    for item in items[:count]:
+        w = item[3] if len(item) > 3 else 0
+        h = item[4] if len(item) > 4 else 0
+        if w > 0 and h > 0:
+            sides.append((float(w) * float(h)) ** 0.5)
+    if len(sides) < count:
+        return 1.0
+    low, high = min(sides), max(sides)
+    if high <= 0:
+        return 1.0
+    return low / high
 
 
 def build_mapping(items, zones=DEFAULT_ZONES, fixed=None):
@@ -134,7 +160,7 @@ class MappingVoter(object):
 
     def __init__(self, zones=DEFAULT_ZONES, expect_num=None, stable_frames=1,
                  x_tolerance=0, ignore_ids=(), include_ids=None,
-                 fixed=None, min_gap_ratio=0.0):
+                 fixed=None, min_gap_ratio=0.0, min_size_ratio=0.0):
         self.zones = tuple(zones)
         # 默认要求至少填满所有格子
         self.expect_num = int(expect_num) if expect_num else len(self.zones)
@@ -144,6 +170,7 @@ class MappingVoter(object):
         self.include_ids = None if include_ids is None else tuple(include_ids)
         self.fixed = dict(fixed or {})
         self.min_gap_ratio = float(min_gap_ratio or 0.0)
+        self.min_size_ratio = float(min_size_ratio or 0.0)
         self.mapping = None
         self._history = []
 
@@ -157,7 +184,10 @@ class MappingVoter(object):
 
         :return: (mapping, state)
             state == "incomplete" 本帧目标数量不够，不参与投票
-            state == "geometry"   数量够但三个格子间距明显不均匀（斜看/凑数），不参与投票
+            state == "extra"      本帧目标数量过多（把场上别的东西也认进来了），不参与投票
+            state == "duplicate"  三格里出现重复类别，不参与投票
+            state == "geometry"   三个格子间距明显不均匀（斜看/凑数），不参与投票
+            state == "size"       三个框大小差异过大（多半是金砖不是板子），不参与投票
             state == "unstable"   本帧有效但还没稳定
             state == "stable"     本次刚稳定，mapping 是结果 -> 应该发布
             state == "unchanged"  已稳定的结果没变化 -> 不必重复发布
@@ -184,6 +214,14 @@ class MappingVoter(object):
             if ratio < self.min_gap_ratio:
                 self._history = []
                 return None, "geometry"
+
+        if self.min_size_ratio > 0 and len(items) >= 3:
+            # 三个图案应当等大且大致共面；中央 3×3 金砖远近不同，尺寸差异明显。
+            # 这条不依赖 ROI 标定，能挡住"把金砖当板子"的误判。
+            size_ratio = size_uniform_ratio(items, len(self.zones))
+            if size_ratio < self.min_size_ratio:
+                self._history = []
+                return None, "size"
 
         mapping = build_mapping(items, self.zones, self.fixed)
         signature = tuple(sorted(mapping.items()))

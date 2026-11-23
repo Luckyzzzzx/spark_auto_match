@@ -73,6 +73,55 @@ detect:
   `nav_params.yaml`、`route_table.yaml`、`robot_preflight.py`、`route_report.py`、`pkl2yaml.py`、
   `test/`、`docs/`，以及 14 个历史遗留脚本已移到 `~/legacy_auto_match_nodes_20261123/`。
 
+## 0.3 分类板 ROI：为什么必须标、怎么标
+
+**风险**：分类板和中央金砖区用的是同样三种图案（玩偶/时钟/香蕉），共用同一个相机。
+机器人在分类区停车时，如果画面里同时出现板子和后面的金砖，`board_classifier` 光靠类别分不出来。
+
+**已有多重护栏**（任何一条不满足就不投票）：
+
+| 护栏 | 配置 | 挡住什么 |
+| --- | --- | --- |
+| 数量必须正好 3 | `board.expect_num` | 画面里金砖+板子同时可见（4 个以上）→ `extra` |
+| 三格间距均匀 | `board.min_gap_ratio` | 斜视透视压缩、凑数 → `geometry` |
+| **三格尺寸一致**（新增） | `board.min_size_ratio` | **把远近不同的金砖当成板子** → `size` |
+| 不重复类别 | 内置 | 同一图案被认成两次 → `duplicate` |
+| 只看指定类别 | `board.include_names` | 蛋糕/场地标记 → 直接丢弃 |
+| 连续多帧一致 | `board.stable_frames` | 单帧抖动 |
+
+`min_size_ratio` 是**不依赖标定**的那一条：板上三个图案等大且共面，框的等效边长应该接近；
+中央 3×3 金砖离相机远近不同，框大小差异明显。设 `0` 可关闭。
+
+**标定 ROI（最后一道防线）**：
+
+```bash
+# 机器人停在 Classification_area 后
+rosrun auto_match measure_board_roi.py --seconds 8          # 只测量并打印建议值
+rosrun auto_match measure_board_roi.py --seconds 8 --write  # 满意后写回 items_config.yaml（自动 .bak）
+```
+
+脚本会连续采帧，只统计**通过上面所有护栏**的帧，取 10%~90% 分位的外接矩形再留 `--margin` 余量，
+避免单帧离群把 ROI 拉大。输出示例：
+
+```
+== 采集统计 ==
+  总帧数 61，通过校验 47（77%）
+  丢弃 incomplete  14 帧
+
+== 建议 ROI（像素，x1, y1, x2, y2）==
+  roi: [412, 305, 968, 521]
+  边长 556 x 216 px，四周余量 25 px
+```
+
+写回后再验证一次：
+
+```bash
+rosservice call /board_classifier/capture
+rostopic echo /board_mapping -n1     # 出 mapping 且日志无 extra/geometry/size 即通过
+```
+
+> ROI 绑定「那个停车位 + 那个相机姿态」，停偏 10cm 就可能框不住；所以余量不要省，宁可框大一点。
+
 ## 1. 文件与职责
 
 | 文件 | 状态 | 说明 |
