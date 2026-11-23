@@ -213,8 +213,12 @@ class SparkDetect:
                     continue
             else:
                 try:
-                    outputs = model(source, size=self.img_size,
-                                    augment=self.augment, iou=self.iou_thres)
+                    try:
+                        outputs = model(source, size=self.img_size,
+                                        augment=self.augment, iou=self.iou_thres)
+                    except TypeError:
+                        # 部分 yolov5 版本 forward() 不接受 iou 参数，回退到默认
+                        outputs = model(source, size=self.img_size, augment=self.augment)
                     names = model.model.names
                     boxes = outputs.xyxy[0]
                 except Exception as exc:
