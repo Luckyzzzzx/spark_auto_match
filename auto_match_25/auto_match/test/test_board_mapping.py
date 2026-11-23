@@ -24,6 +24,7 @@ from board_mapping import (  # noqa: E402
     find_duplicate_ids,
     gap_uniform_ratio,
     normalize_detections,
+    size_uniform_ratio,
     zone_for,
 )
 
@@ -193,6 +194,40 @@ class BoardRulesTest(unittest.TestCase):
         self.assertEqual(state, 'stable')
         self.assertEqual(mapping, {5: 'Collection_A', 1: 'Collection_B',
                                    3: 'Collection_C', 2: 'Collection_D'})
+
+
+class SizeGuardTest(unittest.TestCase):
+    """三格尺寸一致性：用来挡住"把中央 3×3 金砖当成分类板"。"""
+
+    def _frame(self, sizes):
+        # (id, x, score, w, h)
+        return [(i + 1, 100 * (i + 1), 0.9, sizes[i], sizes[i]) for i in range(3)]
+
+    def test_uniform_sizes_pass(self):
+        self.assertAlmostEqual(size_uniform_ratio(self._frame([40, 42, 41])), 40 / 42.0, places=3)
+
+    def test_mixed_sizes_fail(self):
+        ratio = size_uniform_ratio(self._frame([40, 60, 20]))
+        self.assertLess(ratio, 0.6)
+
+    def test_missing_sizes_are_not_blocking(self):
+        frame = [(1, 100, 0.9), (2, 200, 0.9), (3, 300, 0.9)]   # 没有 w/h
+        self.assertEqual(size_uniform_ratio(frame), 1.0)
+
+    def test_voter_rejects_size_mismatch(self):
+        voter = MappingVoter(stable_frames=1, min_size_ratio=0.55)
+        self.assertEqual(voter.update(self._frame([40, 60, 20])), (None, 'size'))
+
+    def test_voter_accepts_close_sizes(self):
+        voter = MappingVoter(stable_frames=1, min_size_ratio=0.55)
+        mapping, state = voter.update(self._frame([40, 42, 41]))
+        self.assertEqual(state, 'stable')
+        self.assertEqual(mapping[1], 'Collection_B')
+
+    def test_normalize_keeps_sizes(self):
+        kept = normalize_detections([(1, 100, 0.9, 40, 30)])
+        self.assertEqual(len(kept[0]), 5)
+        self.assertEqual((kept[0][3], kept[0][4]), (40.0, 30.0))
 
 
 if __name__ == '__main__':

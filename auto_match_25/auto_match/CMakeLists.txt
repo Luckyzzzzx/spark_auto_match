@@ -159,6 +159,7 @@ catkin_install_python(PROGRAMS
   nodes/detect_ros.py
   nodes/runtask.py
   scripts/robot_preflight.py
+  scripts/measure_board_roi.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

@@ -2,7 +2,125 @@
 
 > 对应分工表第一行：`detect_ros.py`、`items_config.yaml`、分类板识别（新增）。
 > 依据：《赛项规则拟定版》自动任务赛 + 《夺宝奇兵自动赛-说明文档》
-> 最后更新：2026-11-19（运行环境与分类板采集加固）
+> 最后更新：2026-11-23（按机器人实测环境修正后端与启动脚本）
+
+## 0. 机器人实测环境（2026-11-23 巡检 `10.24.170.0`）
+
+| 项 | 实测值 | 对代码的影响 |
+| --- | --- | --- |
+| Python | `/usr/bin/python3` **3.8.10** | 不需要 venv |
+| 后端包 | `ultralytics 8.0.143`、`yolov5 7.0.13`、`torch 2.0.1+cu117`（**CPU**，无 GPU） | 两个后端都能跑 |
+| `~/yolo_venv` | **不存在** | `run_detect_ros.sh` 旧版会直接 `exit 2` → 已改为回退系统 python3 |
+| 权重 | `~/auto.pt`(14M)、`~/banana.pt`(6.4M) 都是 **YOLOv5** 格式 | `backend: ultralytics` 会报 “NOT forwards compatible” → 改用 `backend: yolov5` |
+| `~/yolov8n.pt` | **不存在** | 原配置指着它，等于没有模型 |
+| 蛋糕权重 | `~/cake_dataset_v4_20261122/runs/cake_v4/weights/best.pt`（YOLOv8，`{0: 'cake'}`） | 可用，但目前只发布到 `/cake_detections`，主链路没订阅 |
+| 现役部署 | `~/spark_noetic/src/3rd_app/auto_match_25/auto_match`（旧版：yolov5 后端、无 `board_classifier.py`） | 仓库新链路尚未部署 |
+
+结论：**当前唯一能跑的组合是 `yolov5` 后端 + `auto.pt`/`banana.pt`**，配置已按此调整。
+
+## 0.1 两台机器人权重不同 → 改用「模型清单」
+
+`10.25.141.8` 上没有 `auto.pt`/`banana.pt`，只有通用 `~/yolov8n.pt`（COCO）+ `~/cake_best.pt`、
+`~/cake_v4_best.pt`。所以配置里不再写死单个 `model_auto`，改成清单：
+
+```yaml
+detect:
+  models:
+    - path: ~/auto.pt                     # 170.0 自训练 YOLOv5
+    - path: ~/banana.pt                   # 170.0 香蕉专用
+    - path: ~/cake_v4_best.pt             # 141.8 蛋糕
+    - path: ~/cake_dataset_v4_20261122/runs/cake_v4/weights/best.pt   # 170.0 蛋糕
+    - path: ~/cake_best.pt                # 141.8 旧蛋糕（兜底）
+    - path: ~/yolov8n.pt                  # 141.8 通用 COCO（兜底）
+      aliases: {"teddy bear": bear, "wine glass": wine, "bear": wild_bear}
+```
+
+规则：
+
+* **文件不存在自动跳过**（记 info，不刷 error）；
+* `backend` 省略 = `auto`：先试 ultralytics，失败再试 yolov5（v5 权重 ultralytics 会明确拒绝）；
+* `aliases` **只对 COCO 权重生效**，自训练权重的类别名已经是项目内部名，别名表留空即可
+  —— 2026-11-23 踩过一次：全局 `"bear": wild_bear` 把玩偶改名，启动自检直接报缺 `bear`。
+
+实机（170.0）加载结果：
+
+```
+[INFO] 加载模型(yolov5): /home/spark/auto.pt
+[INFO] 加载模型(ultralytics): /home/spark/banana.pt
+[INFO] 加载模型(ultralytics): /home/spark/cake_dataset_v4_20261122/.../best.pt
+[INFO] 模型类别自检通过: ['wine', 'cake', 'banana', 'bear', 'clock']
+[INFO] detect_ros 就绪: models=[yolov5(7类), ultralytics(41类), ultralytics(1类)]
+```
+
+## 0.2 两台机器人（2026-11-23 约定）
+
+| | **1 号机** | **2 号机** |
+| --- | --- | --- |
+| IP | `10.24.170.0` | `10.25.141.8` |
+| 角色 | 主用/比赛 | 副机/训练与调参 |
+| 系统 python3 | ultralytics 8.0.143 + yolov5 7.0.13 + torch 2.0.1（CPU） | 只有 ROS 基础包，**没有**推理库 |
+| `~/yolo_venv` | 无（回退系统 python3） | 有（1.6G，ultralytics 8.4.215 + yolov5 7.0.13） |
+| 物品模型 | `~/auto.pt`、`~/banana.pt`（自训练 YOLOv5） | 无，只有 `~/yolov8n.pt`（COCO） |
+| 蛋糕模型 | `~/cake_dataset_v4_20261122/runs/cake_v4/weights/best.pt` | `~/cake_v4_best.pt`、`~/cake_best.pt` |
+| 部署路径 | `~/spark_noetic/src/3rd_app/auto_match_25/auto_match` | 同（各自独立） |
+| 点位文件 | 自己的 `config/mark_map.pkl`（14 个点，含 `Collection_A`） | 自己的 `config/mark_map.yaml`（14 个点） |
+
+**迁移注意（2026-11-23 已执行）**：
+
+* 代码统一从仓库部署（不要在两台机器间互拷 `nodes/`，会把对方的点位/参数带过去）；
+* **不要覆盖** `config/mark_map.*`、`config/test_map.*` —— 每台机器的地图与点位是各自标定的；
+* 1 号机已补齐 2 号机原有的 B/D 组基础设施：`nav_manager.py`、`nav_route.py`、
+  `nav_params.yaml`、`route_table.yaml`、`robot_preflight.py`、`route_report.py`、`pkl2yaml.py`、
+  `test/`、`docs/`，以及 14 个历史遗留脚本已移到 `~/legacy_auto_match_nodes_20261123/`。
+
+## 0.3 分类板 ROI：为什么必须标、怎么标
+
+**风险**：分类板和中央金砖区用的是同样三种图案（玩偶/时钟/香蕉），共用同一个相机。
+机器人在分类区停车时，如果画面里同时出现板子和后面的金砖，`board_classifier` 光靠类别分不出来。
+
+**已有多重护栏**（任何一条不满足就不投票）：
+
+| 护栏 | 配置 | 挡住什么 |
+| --- | --- | --- |
+| 数量必须正好 3 | `board.expect_num` | 画面里金砖+板子同时可见（4 个以上）→ `extra` |
+| 三格间距均匀 | `board.min_gap_ratio` | 斜视透视压缩、凑数 → `geometry` |
+| **三格尺寸一致**（新增） | `board.min_size_ratio` | **把远近不同的金砖当成板子** → `size` |
+| 不重复类别 | 内置 | 同一图案被认成两次 → `duplicate` |
+| 只看指定类别 | `board.include_names` | 蛋糕/场地标记 → 直接丢弃 |
+| 连续多帧一致 | `board.stable_frames` | 单帧抖动 |
+
+`min_size_ratio` 是**不依赖标定**的那一条：板上三个图案等大且共面，框的等效边长应该接近；
+中央 3×3 金砖离相机远近不同，框大小差异明显。设 `0` 可关闭。
+
+**标定 ROI（最后一道防线）**：
+
+```bash
+# 机器人停在 Classification_area 后
+rosrun auto_match measure_board_roi.py --seconds 8          # 只测量并打印建议值
+rosrun auto_match measure_board_roi.py --seconds 8 --write  # 满意后写回 items_config.yaml（自动 .bak）
+```
+
+脚本会连续采帧，只统计**通过上面所有护栏**的帧，取 10%~90% 分位的外接矩形再留 `--margin` 余量，
+避免单帧离群把 ROI 拉大。输出示例：
+
+```
+== 采集统计 ==
+  总帧数 61，通过校验 47（77%）
+  丢弃 incomplete  14 帧
+
+== 建议 ROI（像素，x1, y1, x2, y2）==
+  roi: [412, 305, 968, 521]
+  边长 556 x 216 px，四周余量 25 px
+```
+
+写回后再验证一次：
+
+```bash
+rosservice call /board_classifier/capture
+rostopic echo /board_mapping -n1     # 出 mapping 且日志无 extra/geometry/size 即通过
+```
+
+> ROI 绑定「那个停车位 + 那个相机姿态」，停偏 10cm 就可能框不住；所以余量不要省，宁可框大一点。
 
 ## 1. 文件与职责
 
@@ -201,7 +319,43 @@ python3 tools/inspect_model.py            # 默认查 ~/yolov8n.pt
 结论里会直接告诉你缺哪类、以及「cake 缺失该怎么临时绕过」。
 
 
-## 10. 和另外三个人怎么不撞车
+## 10. 部署到机器人（无 git，用 scp/rsync）
+
+机器人上**没有**本仓库的工作副本（现役代码是 `~/spark_noetic/src/3rd_app/auto_match_25/auto_match`），
+所以不要指望 `git pull`。部署流程（先备份、只覆盖视觉文件）：
+
+```bash
+HOST=spark@10.24.170.0
+DEST=/home/spark/spark_noetic/src/3rd_app/auto_match_25/auto_match
+BASE=$(date +%Y%m%d_%H%M%S)
+
+# 1) 备份（整包，出事能整体回滚）
+ssh $HOST "cp -a $DEST ~/backup_auto_match_$BASE"
+
+# 2) 只覆盖视觉相关文件
+cd auto_match_25/auto_match
+scp nodes/detect_ros.py nodes/board_mapping.py nodes/board_classifier.py $HOST:$DEST/nodes/
+scp config/items_config.yaml                     $HOST:$DEST/config/
+scp scripts/run_detect_ros.sh                    $HOST:$DEST/scripts/
+scp launch/vision_test.launch                    $HOST:$DEST/launch/
+
+# 3) 补执行位（scp 不带权限位）
+ssh $HOST "chmod +x $DEST/nodes/board_classifier.py $DEST/nodes/board_mapping.py $DEST/scripts/run_detect_ros.sh"
+
+# 4) 验证视觉链路（不启底盘/机械臂）
+ssh $HOST "source /opt/ros/noetic/setup.bash && source ~/spark_noetic/devel/setup.bash && \
+  roslaunch auto_match vision_test.launch start_camera:=true" &
+sleep 12
+ssh $HOST "source /opt/ros/noetic/setup.bash && source ~/spark_noetic/devel/setup.bash && \
+  rosservice call /board_classifier/capture && rostopic hz /objects --window=20" 
+```
+
+回滚：`ssh $HOST "rm -rf $DEST && cp -a ~/backup_auto_match_$BASE $DEST"`
+
+> 只部署视觉文件是**故意**的：`runtask.py` / `nav_manager.py` 依赖 B 组点位（`Collection_A` 仍未标），
+> 整包部署会把别人正在调的导航一起换掉。
+
+## 11. 和另外三个人怎么不撞车
 
 * A 独占：`nodes/detect_ros.py`、`config/items_config.yaml`、`nodes/board_*.py`、`test/`、`docs/vision_module.md`、`tools/inspect_model.py`。
 * `runtask.py` 现在是 8 处改动：6 处分类板对接 + 蛋糕优先（`self.CAKE_ID` / `self.CAKE_FIRST` + 两处判断）。

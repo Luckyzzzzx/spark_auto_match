@@ -50,7 +50,7 @@ if NODE_DIR not in sys.path:
     sys.path.insert(0, NODE_DIR)
 
 from board_mapping import (MappingVoter, DEFAULT_ZONES, find_duplicate_ids,
-                           gap_uniform_ratio, normalize_detections)
+                           gap_uniform_ratio, normalize_detections, size_uniform_ratio)
 
 DEFAULT_BOARD = {
     "enabled": True,
@@ -59,6 +59,7 @@ DEFAULT_BOARD = {
     "stable_frames": 3,
     "x_tolerance": 30,
     "min_gap_ratio": 0.45,
+    "min_size_ratio": 0.55,
     "include_names": [],
     "ignore_ids": [10, 20, 30, 40, 50, 99],
     "fixed_by_name": {},
@@ -115,7 +116,10 @@ def resolve_fixed(fixed_by_name, items):
 
 
 def to_tuples(obj_array, roi=None):
-    """Detection2DArray -> [(item_id, center_x, score), ...]"""
+    """Detection2DArray -> [(item_id, center_x, score, w, h), ...]
+
+    带上框宽高，供「三格尺寸一致性」检查使用（不依赖 ROI 标定）。
+    """
     detections = []
     use_roi = bool(roi and len(roi) == 4)
     if use_roi:
@@ -128,7 +132,8 @@ def to_tuples(obj_array, roi=None):
         if use_roi and not (x_min <= center_x <= x_max and y_min <= center_y <= y_max):
             continue
         hypothesis = obj.results[0]
-        detections.append((hypothesis.id, center_x, hypothesis.score))
+        detections.append((hypothesis.id, center_x, hypothesis.score,
+                           float(obj.bbox.size_x), float(obj.bbox.size_y)))
     return detections
 
 
@@ -169,6 +174,7 @@ class BoardClassifier(object):
             include_ids=self.include_ids,
             fixed=self.fixed,
             min_gap_ratio=float(cfg["min_gap_ratio"]),
+            min_size_ratio=float(cfg["min_size_ratio"]),
         )
 
         self.mapping = {}
@@ -179,9 +185,9 @@ class BoardClassifier(object):
         self.sub = rospy.Subscriber("/objects", Detection2DArray, self.objects_cb, queue_size=1)
 
         rospy.Timer(rospy.Duration(1.0), self.watchdog)
-        rospy.loginfo("board_classifier 就绪：zones=%s 白名单=%s 固定区=%s stable_frames=%s 间距均匀度下限=%.2f ROI=%s active=%s",
+        rospy.loginfo("board_classifier 就绪：zones=%s 白名单=%s 固定区=%s stable_frames=%s 间距下限=%.2f 尺寸下限=%.2f ROI=%s active=%s",
                       self.zones, self.include_ids, self.fixed,
-                      self.voter.stable_frames, self.voter.min_gap_ratio,
+                      self.voter.stable_frames, self.voter.min_gap_ratio, self.voter.min_size_ratio,
                       self.roi or "全图", self.active)
 
     def capture(self, _request):
@@ -235,6 +241,10 @@ class BoardClassifier(object):
             rospy.logwarn_throttle(
                 2.0, "分类板三格间距不均匀(%.2f)，多半是斜视或凑数，本帧不投票: %s",
                 gap_uniform_ratio(items, len(self.zones)), items)
+        elif state == "size":
+            rospy.logwarn_throttle(
+                2.0, "分类板三格大小差异过大(%.2f)，多半把金砖当成板子了，本帧不投票: %s",
+                size_uniform_ratio(items, len(self.zones)), items)
         elif state == "extra":
             rospy.logwarn_throttle(
                 2.0, "分类板 ROI 内目标过多：本帧 %d 个，预期 %d 个，本帧不投票",

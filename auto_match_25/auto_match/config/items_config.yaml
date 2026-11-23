@@ -33,20 +33,30 @@ objects:
 
 # ============================ 检测 ============================
 detect:
-  # 推理后端：机器人现有 yolo_venv 使用 Ultralytics YOLOv8。
-  # 若以后恢复旧版 yolov5 包和自定义权重，可改成 yolov5。
-  backend: ultralytics
+  # 模型清单：按顺序尝试，**文件不存在自动跳过**。
+  # 两台机器人权重不同（170.0 是自训练 YOLOv5，141.8 只有通用 COCO YOLOv8n），
+  # 用这套写法一份配置两台都能跑；backend 省略 = auto（先 ultralytics，失败回退 yolov5）。
+  models:
+    # --- 10.24.170.0 自训练 YOLOv5：bear / wine / clock / *_site / base ---
+    - path: ~/auto.pt
+    # --- 10.24.170.0 自训练 YOLOv5：香蕉单独一个模型 ---
+    - path: ~/banana.pt
+    # --- 蛋糕专用 YOLOv8（单类 cake）：两台机器路径不同，两个都列上 ---
+    - path: ~/cake_v4_best.pt
+    - path: ~/cake_dataset_v4_20261122/runs/cake_v4/weights/best.pt
+    - path: ~/cake_best.pt
+    # --- 10.25.141.8 兜底：通用 COCO YOLOv8n，类别名要用 aliases 翻译 ---
+    - path: ~/yolov8n.pt
+      aliases:
+        "teddy bear": bear
+        "wine glass": wine
+        "bear": wild_bear      # COCO 的 bear 是野生熊，排除，避免误认成玩偶
 
-  # 模型路径，允许 ~ / $HOME；非空模型都会运行，结果合并。
-  # 当前机器人只有 ~/yolov8n.pt。正式比赛仍建议换成实际场景训练的 best.pt。
-  model_auto: ~/yolov8n.pt
-  model_banana: null
-
-  # 通用 COCO 模型类别名 -> 项目内部类别名。自定义权重若已经使用右侧名称，可留着不影响。
-  class_aliases:
-    "bear": wild_bear
-    "teddy bear": bear
-    "wine glass": wine
+  # 旧写法（单模型）仍兼容；只要上面 models 存在，这几项会被忽略。
+  # backend: yolov5
+  # model_auto: ~/auto.pt
+  # model_banana: ~/banana.pt
+  # class_aliases: {}
 
   # 置信度：低于该值的框直接丢弃
   conf_thres: 0.5
@@ -104,6 +114,11 @@ board:
   # 分类板是等宽三格，正视时接近 1.0；斜视或凑数会明显偏小。
   # 板子离得远、透视很强时可以降到 0.35；老是判 geometry 就先关掉（设 0）。
   min_gap_ratio: 0.45
+
+  # 三格检测框的尺寸均匀度下限（最小等效边长/最大等效边长）。
+  # 三个图案等大且共面，正视时接近 1.0；中央 3×3 金砖远近不同、框大小差异明显，
+  # 这条**不依赖 ROI**，能挡住"把金砖当成分类板"。老是判 size 就降到 0.4 或设 0。
+  min_size_ratio: 0.55
 
   # 只有这些类别会上分类板（规则：玩偶/时钟/香蕉）。按名字写，改名不用改 ID。
   include_names: [bear, clock, banana]
