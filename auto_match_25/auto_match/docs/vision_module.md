@@ -18,6 +18,40 @@
 
 结论：**当前唯一能跑的组合是 `yolov5` 后端 + `auto.pt`/`banana.pt`**，配置已按此调整。
 
+## 0.1 两台机器人权重不同 → 改用「模型清单」
+
+`10.25.141.8` 上没有 `auto.pt`/`banana.pt`，只有通用 `~/yolov8n.pt`（COCO）+ `~/cake_best.pt`、
+`~/cake_v4_best.pt`。所以配置里不再写死单个 `model_auto`，改成清单：
+
+```yaml
+detect:
+  models:
+    - path: ~/auto.pt                     # 170.0 自训练 YOLOv5
+    - path: ~/banana.pt                   # 170.0 香蕉专用
+    - path: ~/cake_v4_best.pt             # 141.8 蛋糕
+    - path: ~/cake_dataset_v4_20261122/runs/cake_v4/weights/best.pt   # 170.0 蛋糕
+    - path: ~/cake_best.pt                # 141.8 旧蛋糕（兜底）
+    - path: ~/yolov8n.pt                  # 141.8 通用 COCO（兜底）
+      aliases: {"teddy bear": bear, "wine glass": wine, "bear": wild_bear}
+```
+
+规则：
+
+* **文件不存在自动跳过**（记 info，不刷 error）；
+* `backend` 省略 = `auto`：先试 ultralytics，失败再试 yolov5（v5 权重 ultralytics 会明确拒绝）；
+* `aliases` **只对 COCO 权重生效**，自训练权重的类别名已经是项目内部名，别名表留空即可
+  —— 2026-11-23 踩过一次：全局 `"bear": wild_bear` 把玩偶改名，启动自检直接报缺 `bear`。
+
+实机（170.0）加载结果：
+
+```
+[INFO] 加载模型(yolov5): /home/spark/auto.pt
+[INFO] 加载模型(ultralytics): /home/spark/banana.pt
+[INFO] 加载模型(ultralytics): /home/spark/cake_dataset_v4_20261122/.../best.pt
+[INFO] 模型类别自检通过: ['wine', 'cake', 'banana', 'bear', 'clock']
+[INFO] detect_ros 就绪: models=[yolov5(7类), ultralytics(41类), ultralytics(1类)]
+```
+
 ## 1. 文件与职责
 
 | 文件 | 状态 | 说明 |

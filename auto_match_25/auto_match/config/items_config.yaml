@@ -33,25 +33,30 @@ objects:
 
 # ============================ 检测 ============================
 detect:
-  # 推理后端：ultralytics / yolov5
-  # 【2026-11-23 实测 10.24.170.0】机器人上现有权重 ~/auto.pt、~/banana.pt 是 **YOLOv5** 训练的，
-  # ultralytics 8.x 会直接拒绝加载（"NOT forwards compatible with YOLOv8"），
-  # 而 ~/yolov8n.pt 并不存在。系统 python3 同时装了 yolov5 7.0.13 与 ultralytics 8.0.143，
-  # 所以这里用 yolov5 后端跑自训练权重；等重训出 YOLOv8 权重再改回 ultralytics（一行）。
-  backend: yolov5
+  # 模型清单：按顺序尝试，**文件不存在自动跳过**。
+  # 两台机器人权重不同（170.0 是自训练 YOLOv5，141.8 只有通用 COCO YOLOv8n），
+  # 用这套写法一份配置两台都能跑；backend 省略 = auto（先 ultralytics，失败回退 yolov5）。
+  models:
+    # --- 10.24.170.0 自训练 YOLOv5：bear / wine / clock / *_site / base ---
+    - path: ~/auto.pt
+    # --- 10.24.170.0 自训练 YOLOv5：香蕉单独一个模型 ---
+    - path: ~/banana.pt
+    # --- 蛋糕专用 YOLOv8（单类 cake）：两台机器路径不同，两个都列上 ---
+    - path: ~/cake_v4_best.pt
+    - path: ~/cake_dataset_v4_20261122/runs/cake_v4/weights/best.pt
+    - path: ~/cake_best.pt
+    # --- 10.25.141.8 兜底：通用 COCO YOLOv8n，类别名要用 aliases 翻译 ---
+    - path: ~/yolov8n.pt
+      aliases:
+        "teddy bear": bear
+        "wine glass": wine
+        "bear": wild_bear      # COCO 的 bear 是野生熊，排除，避免误认成玩偶
 
-  # 模型路径，允许 ~ / $HOME；非空模型都会运行，结果合并。
-  model_auto: ~/auto.pt          # 14M，2024 训练，含项目四类
-  model_banana: ~/banana.pt      # 6.4M，2025 训练，香蕉单独一个模型
-
-  # 类别别名：**只在使用 COCO 预训练权重时才有用**（COCO 里玩偶叫 "teddy bear"、酒杯叫 "wine glass"）。
-  # 自训练权重（~/auto.pt、~/banana.pt）的类别名已经是项目内部名，必须留空！
-  # 2026-11-23 实测：留着 "bear": wild_bear 会把玩偶类改名成 wild_bear，
-  #   启动自检直接报「模型缺少 bear」→ 玩偶永远识别不到。
-  # 例（仅 COCO 权重时）：
-  #   "teddy bear": bear
-  #   "wine glass": wine
-  class_aliases: {}
+  # 旧写法（单模型）仍兼容；只要上面 models 存在，这几项会被忽略。
+  # backend: yolov5
+  # model_auto: ~/auto.pt
+  # model_banana: ~/banana.pt
+  # class_aliases: {}
 
   # 置信度：低于该值的框直接丢弃
   conf_thres: 0.5

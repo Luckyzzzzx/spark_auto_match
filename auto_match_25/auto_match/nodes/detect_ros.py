@@ -66,8 +66,43 @@ def load_config():
     return content
 
 
+def load_model_specs(detect_cfg):
+    """把 detect 段解析成模型清单：[{path, backend, aliases}]。
+
+    新写法（推荐，一台配置适配多台机器人）::
+
+        models:
+          - path: ~/auto.pt        # 不存在就自动跳过
+          - path: ~/yolov8n.pt
+            aliases: {"teddy bear": bear}
+
+    旧写法（单模型、全局 backend/class_aliases）仍然兼容。
+    """
+    specs = []
+    models = detect_cfg.get('models')
+    if isinstance(models, list) and models:
+        for item in models:
+            if isinstance(item, dict):
+                specs.append({
+                    'path': item.get('path'),
+                    'backend': str(item.get('backend') or 'auto').lower(),
+                    'aliases': {str(k): str(v) for k, v in (item.get('aliases') or {}).items()},
+                })
+            else:
+                specs.append({'path': item, 'backend': 'auto', 'aliases': {}})
+        return specs
+
+    backend = str(detect_cfg.get('backend') or 'auto').lower()
+    aliases = {str(k): str(v) for k, v in (detect_cfg.get('class_aliases') or {}).items()}
+    for key in ('model_auto', 'model_banana', 'model_cake'):
+        value = detect_cfg.get(key)
+        if value:
+            specs.append({'path': value, 'backend': backend, 'aliases': dict(aliases)})
+    return specs
+
+
 class SparkDetect:
-    """YOLO 推理封装，同时兼容 yolov5 包和 Ultralytics YOLOv8。"""
+    """YOLOv5 / Ultralytics 双后端封装，支持一份配置挂多个模型（按文件存在性自动取舍）。"""
 
     class __results__:
         def __init__(self):
@@ -79,41 +114,22 @@ class SparkDetect:
             self.confidence = []
             self.image = None
 
-    def __init__(self, model_paths, backend='ultralytics', class_aliases=None,
-                 augment=True, iou_thres=0.45, img_size=640):
-        self.backend = str(backend or 'ultralytics').lower()
-        if self.backend not in ('ultralytics', 'yolov5'):
-            raise RuntimeError('不支持的 detect.backend: %s' % self.backend)
-        self.class_aliases = {str(k): str(v) for k, v in (class_aliases or {}).items()}
-        self.models = []
-        loader = None
-        if self.backend == 'ultralytics':
-            try:
-                from ultralytics import YOLO
-                loader = YOLO
-            except Exception as exc:
-                raise RuntimeError('无法导入 ultralytics，请检查视觉 Python 环境: %s' % exc)
-        else:
-            try:
-                import yolov5
-                loader = yolov5.load
-            except Exception as exc:
-                raise RuntimeError('无法导入 yolov5，请检查视觉 Python 环境: %s' % exc)
-
-        for path in model_paths:
-            path = _expand(path)
+    def __init__(self, specs, augment=True, iou_thres=0.45, img_size=640):
+        self.entries = []   # [(backend, model, aliases)]
+        for spec in specs:
+            path = _expand(spec.get('path'))
             if not path:
                 continue
             if not os.path.isfile(path):
-                rospy.logerr('模型文件不存在，跳过: %s', path)
+                # 每台机器人权重不同，缺失是常态，不该刷 error
+                rospy.loginfo('模型不存在，跳过: %s', path)
                 continue
-            try:
-                rospy.loginfo('加载模型: %s', path)
-                self.models.append(loader(path))
-            except Exception as exc:
-                rospy.logerr('模型加载失败 %s: %s', path, exc)
+            loaded = self._load(path, spec.get('backend') or 'auto')
+            if loaded:
+                backend, model = loaded
+                self.entries.append((backend, model, spec.get('aliases') or {}))
 
-        if not self.models:
+        if not self.entries:
             # 没有模型还继续跑，只会让下游一直"看不到物体"，不如当场报错
             raise RuntimeError('没有任何可用模型，请检查 items_config.yaml 的 detect.model_*')
 
@@ -123,19 +139,41 @@ class SparkDetect:
 
         # 所有模型能认出的类别名（用于启动时自检，见 Detector.check_model_classes）
         self.names = set()
-        for model in self.models:
+        for backend, model, aliases in self.entries:
+            for name in self._model_names(backend, model):
+                self.names.add(self._alias(name, aliases))
+
+    def summary(self):
+        """启动日志用：每个已加载模型一行摘要。"""
+        parts = []
+        for backend, model, _aliases in self.entries:
+            parts.append('%s(%d类)' % (backend, len(self._model_names(backend, model))))
+        return ', '.join(parts) or '无'
+
+    def _load(self, path, backend):
+        """按 backend 加载；backend=auto 时先试 ultralytics，再回退 yolov5。"""
+        order = [backend] if backend in ('ultralytics', 'yolov5') else ['ultralytics', 'yolov5']
+        for name in order:
             try:
-                names = self._model_names(model)
-                self.names.update(self._alias_name(name) for name in names)
+                if name == 'ultralytics':
+                    from ultralytics import YOLO
+                    rospy.loginfo('加载模型(ultralytics): %s', path)
+                    return 'ultralytics', YOLO(path)
+                import yolov5
+                rospy.loginfo('加载模型(yolov5): %s', path)
+                return 'yolov5', yolov5.load(path)
             except Exception as exc:
-                rospy.logwarn('读取模型类别失败: %s', exc)
+                rospy.loginfo('%s 加载失败(%s): %s', name, path, str(exc).splitlines()[0][:110])
+        rospy.logerr('模型加载失败，所有后端都不认: %s', path)
+        return None
 
-    def _alias_name(self, name):
-        name = str(name)
-        return self.class_aliases.get(name, name)
+    @staticmethod
+    def _alias(name, aliases):
+        return aliases.get(str(name), str(name))
 
-    def _model_names(self, model):
-        if self.backend == 'ultralytics':
+    @staticmethod
+    def _model_names(backend, model):
+        if backend == 'ultralytics':
             names = getattr(model, 'names', {})
         else:
             names = getattr(getattr(model, 'model', None), 'names', {})
@@ -149,15 +187,20 @@ class SparkDetect:
             return names.get(index, names.get(str(index), str(index)))
         return names[index]
 
-    def detect(self, image, draw=True):
-        """检测一帧，返回结果对象；image 会被就地画框（draw=True 时）。"""
+    def detect(self, image_bgr, draw=True):
+        """检测一帧（输入 BGR），返回结果对象；draw=True 时在原图上画框。
+
+        每个模型用自己的后端和别名：ultralytics 吃 BGR，yolov5 封装吃 RGB，
+        这里按模型分别转换，画框统一回到 BGR 画布上。
+        """
         result = self.__results__()
 
-        for model in self.models:
-            if self.backend == 'ultralytics':
+        for backend, model, aliases in self.entries:
+            source = image_bgr if backend == 'ultralytics' else cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+            if backend == 'ultralytics':
                 try:
                     output = model.predict(
-                        source=image,
+                        source=source,
                         imgsz=self.img_size,
                         augment=self.augment,
                         iou=self.iou_thres,
@@ -170,7 +213,7 @@ class SparkDetect:
                     continue
             else:
                 try:
-                    outputs = model(image, size=self.img_size,
+                    outputs = model(source, size=self.img_size,
                                     augment=self.augment, iou=self.iou_thres)
                     names = model.model.names
                     boxes = outputs.xyxy[0]
@@ -179,7 +222,7 @@ class SparkDetect:
                     continue
 
             for box in boxes:
-                if self.backend == 'ultralytics':
+                if backend == 'ultralytics':
                     xyxy = box.xyxy[0].tolist()
                     conf = float(box.conf[0].item())
                     cls = int(box.cls[0].item())
@@ -191,23 +234,23 @@ class SparkDetect:
                 center_y = int((y1 + y2) / 2)
                 size_x = int(x2 - x1)
                 size_y = int(y2 - y1)
+                name = self._alias(self._name_at(names, int(cls)), aliases)
 
                 if draw:
-                    name = self._alias_name(self._name_at(names, int(cls)))
                     label = '%s %.2f' % (name, float(conf))
-                    cv2.rectangle(image, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 3)
-                    cv2.putText(image, label, (int(x1), int(y1) - 10),
+                    cv2.rectangle(image_bgr, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 3)
+                    cv2.putText(image_bgr, label, (int(x1), int(y1) - 10),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-                    cv2.circle(image, (center_x, center_y), 5, (255, 0, 0), -1)
+                    cv2.circle(image_bgr, (center_x, center_y), 5, (255, 0, 0), -1)
 
                 result.size_x.append(size_x)
                 result.size_y.append(size_y)
-                result.name.append(self._alias_name(self._name_at(names, int(cls))))
+                result.name.append(name)
                 result.x.append(center_x)
                 result.y.append(center_y)
                 result.confidence.append(float(conf))
 
-        result.image = image
+        result.image = image_bgr
         return result
 
 
@@ -232,11 +275,9 @@ class Detector:
         self.object_pub = rospy.Publisher("/objects", Detection2DArray, queue_size=1)
         self.bridge = CvBridge()
 
+        specs = load_model_specs(detect_cfg)
         self.detector = SparkDetect(
-            [detect_cfg.get('model_auto', '~/auto.pt'),
-             detect_cfg.get('model_banana', '~/banana.pt')],
-            backend=detect_cfg.get('backend', 'ultralytics'),
-            class_aliases=detect_cfg.get('class_aliases') or {},
+            specs,
             augment=detect_cfg.get('augment', True),
             iou_thres=detect_cfg.get('iou_thres', 0.45),
             img_size=detect_cfg.get('img_size', 640),
@@ -247,8 +288,8 @@ class Detector:
             image_topic, Image, self.image_cb, queue_size=1, buff_size=2 ** 24
         )
         self.check_model_classes(detect_cfg.get('check_classes') or [])
-        rospy.loginfo('detect_ros 就绪: backend=%s image=%s conf=%.2f class_conf=%s filter_ids=%s max_rate=%sHz',
-                      self.detector.backend, image_topic, self.conf_thres,
+        rospy.loginfo('detect_ros 就绪: models=[%s] image=%s conf=%.2f class_conf=%s filter_ids=%s max_rate=%sHz',
+                      self.detector.summary(), image_topic, self.conf_thres,
                       self.class_conf, sorted(self.filter_ids),
                       '不限' if not self.min_period else '%.1f' % (1.0 / self.min_period))
 
@@ -343,12 +384,8 @@ class Detector:
             rospy.logerr_throttle(2.0, '图像消息异常: %s', exc)
             return
 
-        # Ultralytics 的 numpy 输入约定为 OpenCV BGR，并在内部转 RGB；
-        # 旧 yolov5 封装沿用原项目的 RGB 输入，避免颜色通道被反转两次。
-        if self.detector.backend == 'ultralytics':
-            image = cv_image.copy()
-        else:
-            image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
+        # 统一按 BGR 交给 SparkDetect，内部再按每个模型的后端决定是否转 RGB
+        image = cv_image.copy()
 
         obj_array = Detection2DArray()
         obj_array.header = data.header
@@ -410,10 +447,7 @@ class Detector:
         if not self.publish_debug:
             return
         try:
-            if self.detector.backend == 'ultralytics':
-                img = results.image
-            else:
-                img = cv2.cvtColor(results.image, cv2.COLOR_RGB2BGR)
+            img = results.image          # SparkDetect 已经统一返回 BGR
             # 机器人视觉 venv 的 OpenCV 5 与 Noetic cv_bridge 的类型表不兼容，
             # cv2_to_imgmsg 会在 CV_8UC3(16) 上抛 KeyError。这里按 ROS Image
             # 协议直接构造消息，避免调试图拖垮整个检测回调。

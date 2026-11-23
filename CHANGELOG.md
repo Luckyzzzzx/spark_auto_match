@@ -19,6 +19,16 @@
 - 已按上表把视觉相关文件同步到 `~/spark_noetic/src/3rd_app/auto_match_25/auto_match`（先整包备份），
   未改动 `runtask.py` / `nav_manager.py`（依赖 B 组点位）。
 
+### 追加（同日）· 一套配置通吃两台机器人
+- `detect.models` 支持**模型清单**：按顺序尝试、文件不存在自动跳过；
+  每个模型可单独指定 `backend`（默认 `auto`：先 ultralytics 再 yolov5）和 `aliases`。
+- 起因：`10.25.141.8` 上没有 `auto.pt`/`banana.pt`，只有通用 `~/yolov8n.pt`（COCO）
+  与 `~/cake_best.pt`/`~/cake_v4_best.pt`；而 `10.24.170.0` 只有自训练 YOLOv5 权重。
+  单模型写法必然有一台跑不了。
+- 蛋糕模型接入 `/objects`（id=5）：两台机器的 cake 权重路径都列进清单，
+  实机自检从「缺少 `['cake']`」变为「自检通过: wine/cake/banana/bear/clock」。
+- 实机（170.0）加载结果：`models=[yolov5(7类), ultralytics(41类), ultralytics(1类)]`。
+
 ## 2026-11-19 · 自动组（B 导航 / D 调度）
 
 ### 修复
