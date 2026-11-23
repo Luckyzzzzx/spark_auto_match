@@ -1,5 +1,23 @@
 # 任务日志
 
+## 2026-11-22 晚 · B组（导航）
+
+### 建图验证（临场场地，半成品）
+- 场地未完全围拦（约 1/3 缺口），且有人、另一台机器人在场
+- 两次 gmapping 建图，v2 比 v1 边界更连续（围栏轮廓更完整）
+- 结果：384×384（19.2m），障碍 0.5% / 空闲 3.1% / 未知 96.4%（符合"场地未围全"）
+- 地图暂存机器人 `/tmp/test_map_v2.pgm`，未替换 config/test_map（等正式场地）
+- 新增 `scripts/analyze_map.py`：分析 pgm 地图的 障碍/空闲/未知 占比
+
+### 现场问题排查
+- 相机 Cheese 报错：非故障，是 ROS 相机独占 `/dev/video*`（用 `rqt_image_view` 看即可）
+- teleop 无响应：launch 自带的 teleop 绑在 SSH 终端（pts/0），VNC 键盘收不到；改为 VNC 桌面手动 `rosrun spark_teleop spark_teleop_node 0.14 0.5`
+- 命令里混入 `<br/>` 导致 `bash: br/: No such file`
+
+### 机器人环境
+- 10.25.141.8 已同步最新代码（nav_route、tools）
+- 识别模型 `auto.pt`/`banana.pt` **缺失**，需 A/C 组补
+
 ## 2026-11-22 · B组（导航）
 
 ### 新增
