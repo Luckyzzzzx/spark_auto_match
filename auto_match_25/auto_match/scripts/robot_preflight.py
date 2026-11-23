@@ -6,6 +6,7 @@ import argparse
 import math
 import os
 import pickle
+import shutil
 import subprocess
 import sys
 
@@ -21,6 +22,33 @@ REQUIRED_MARKS = {
 
 def clean_name(value):
     return str(value).strip().strip("\"'").strip()
+
+
+def collect_model_paths(detect):
+    """收集配置里声明的模型路径，兼容新写法（models 清单）与旧写法（model_auto 等）。"""
+    entries = detect.get("models")
+    paths = []
+    if isinstance(entries, list) and entries:
+        for item in entries:
+            path = item.get("path") if isinstance(item, dict) else item
+            if path:
+                paths.append(path)
+        return paths
+    for key in ("model_auto", "model_banana", "model_cake"):
+        if detect.get(key):
+            paths.append(detect[key])
+    return paths
+
+
+def resolve_vision_python():
+    """与 scripts/run_detect_ros.sh 保持同一套解释器选择逻辑。"""
+    explicit = os.environ.get("AUTO_MATCH_VENV_PYTHON")
+    if explicit:
+        return explicit, "AUTO_MATCH_VENV_PYTHON"
+    venv = os.path.expanduser("~/yolo_venv/bin/python")
+    if os.path.isfile(venv):
+        return venv, "~/yolo_venv"
+    return sys.executable or "python3", "系统 python3"
 
 
 def package_path(explicit):
@@ -71,26 +99,41 @@ def main():
         with open(items_path, "r", encoding="utf8") as stream:
             config = yaml.safe_load(stream) or {}
         detect = config.get("detect", {}) or {}
-        models = [detect.get("model_auto"), detect.get("model_banana")]
-        models = [os.path.expandvars(os.path.expanduser(str(p))) for p in models if p]
-        if not models:
-            errors.append("items_config.yaml 没有配置模型")
-        for model in models:
-            if not os.path.isfile(model):
-                errors.append("模型不存在: %s" % model)
+        paths = collect_model_paths(detect)
+        if not paths:
+            errors.append("items_config.yaml 没有配置任何模型（detect.models 或 model_auto）")
+        else:
+            expanded = [os.path.expandvars(os.path.expanduser(str(p))) for p in paths]
+            found = [p for p in expanded if os.path.isfile(p)]
+            if not found:
+                errors.append("所有配置的模型都不存在: %s" % ", ".join(expanded))
+            else:
+                missing = [p for p in expanded if p not in found]
+                if missing:
+                    # 多台机器人共用一份配置，缺失是正常的
+                    warnings.append("部分模型在本机不存在（可接受）: %s" % ", ".join(missing))
+                print("[INFO] 可用模型 %d 个: %s" % (len(found), ", ".join(found)))
     except Exception as exc:
         errors.append("无法读取 items_config.yaml: %s" % exc)
 
-    venv_python = os.environ.get(
-        "AUTO_MATCH_VENV_PYTHON", os.path.expanduser("~/yolo_venv/bin/python"))
-    if not os.path.isfile(venv_python):
-        errors.append("视觉虚拟环境 Python 不存在: %s" % venv_python)
+    python_bin, python_src = resolve_vision_python()
+    if not (os.path.isfile(python_bin) or shutil.which(python_bin)):
+        errors.append("找不到视觉 Python: %s (%s)" % (python_bin, python_src))
     else:
+        check = ("import importlib.util as u;"
+                 "mods=[m for m in ('ultralytics','yolov5') if u.find_spec(m)];"
+                 "assert mods, 'no backend';"
+                 "import cv2, rospkg, yaml")
         result = subprocess.run(
-            [venv_python, "-c", "import ultralytics,cv2,rospkg,yaml"],
+            [python_bin, "-c", check],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if result.returncode:
-            errors.append("视觉环境依赖导入失败: %s" % result.stderr.strip().splitlines()[-1])
+            errors.append("视觉环境依赖导入失败(%s): %s"
+                          % (python_bin, result.stderr.strip().splitlines()[-1]))
+        else:
+            print("[INFO] 视觉 Python: %s (%s)" % (python_bin, python_src))
+            if python_src == "系统 python3":
+                warnings.append("未使用 ~/yolo_venv，已回退系统 python3（本机没有 venv 时正常）")
 
     if args.mode == "full":
         for filename in ("thefile.txt", "thefile2.txt"):
