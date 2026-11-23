@@ -33,6 +33,7 @@ if NODE_DIR not in sys.path:
     sys.path.insert(0, NODE_DIR)
 
 from nav_manager import NavigationManager
+from task_rules import choose_drop_zone, remaining_seconds, should_stop
 
 class SwiftProInterface:
     def __init__(self):
@@ -701,10 +702,18 @@ class AutoAction:
             raise RuntimeError("缺少必需导航点位: %s；请先标定，禁止启动自动任务" % ", ".join(missing))
 
         # ==== 分类板映射（由 A 组 board_classifier.py 发布到 /board_mapping）====
-        # D 组只订阅、不改识别逻辑；识别失败时退回 items_config.yaml 的 board_fallback_zone
+        # D 组只订阅、不改识别逻辑；识别失败时按物品分散兜底，避免全塞一个区
         self.mapping = {}
         self.board_timeout = 10.0
-        self.default_zone = self._load_fallback_zone()
+        task_cfg = self._load_task_config()
+        self.default_zone = task_cfg['default_zone']
+        self.fallback_zones = task_cfg['fallback_zones']
+        self.time_budget_s = task_cfg['time_budget_s']
+        self.min_remaining_s = task_cfg['min_remaining_s']
+        self.task_deadline = None
+        rospy.loginfo("调度参数: 兜底区=%s 按物品兜底=%s 时间预算=%.0fs 预留=%.0fs",
+                      self.default_zone, self.fallback_zones,
+                      self.time_budget_s, self.min_remaining_s)
 
         # 订阅任务控制指令的话题
         self.task_cmd_sub = rospy.Subscriber("/task_start_flag", String, self.task_cmd_cb) # 订阅任务开始与否信号
@@ -724,6 +733,10 @@ class AutoAction:
 
         # ===== 现在开始执行任务 =====
         rospy.loginfo("start task now.")
+        # 规则：正式比赛 10 分钟，超时放置不得分且每秒扣 2 分 —— 到点必须停止新抓取
+        self.task_deadline = time.time() + self.time_budget_s
+        rospy.loginfo("时间预算 %.0fs，截止时刻约 %.0fs（剩余不足 %.0fs 时停止抓取）",
+                      self.time_budget_s, self.task_deadline, self.min_remaining_s)
         self.arm.arm_grasp_ready()  # 移动机械臂到其他地方
         # ==== 离开起始区,避免在膨胀区域中，导致导航失败 =====
         if not self.robot.step_go(0.3):
@@ -785,6 +798,13 @@ class AutoAction:
                 break
             if not sorting_status_times:
                 rospy.logwarn("所有分拣点已耗尽，提前结束任务")
+                break
+
+            # 时间预算：剩余时间不够再走一轮（导航+抓取+放置）时就停手，把时间留给收尾
+            if should_stop(time.time(), self.task_deadline, self.min_remaining_s):
+                rospy.logwarn("时间预算将尽（剩余 %.0fs < 预留 %.0fs），停止继续抓取，共完成 %d 块",
+                              remaining_seconds(self.task_deadline, time.time()),
+                              self.min_remaining_s, total_drop_times)
                 break
             else:
                 # 就近选点：从上一个放置区(drop_zone)出发，选距离最近的未抓分拣点，减少空跑
@@ -861,14 +881,18 @@ class AutoAction:
             self.arm.arm_grasp_ready()
             print("========前往放置区===== ")
 
-            if item_type == self.CAKE_ID:
-                drop_zone = "Collection_A"   # 蛋糕固定 A 区（规则硬性要求，且必须第一个放）
-            elif self.CAKE_FIRST and total_drop_times == 0:
+            if self.CAKE_FIRST and total_drop_times == 0 and item_type != self.CAKE_ID:
                 drop_zone = "Collection_A"   # 第一块没认成蛋糕（模型缺 cake 类）也先放 A，避免占用 B/C/D
                 rospy.logwarn(f"第一块未识别为蛋糕(id={item_type})，仍按规则放 A 区")
             else:
-                # 用分类板识别的结果，找对应放置区
-                drop_zone = self.mapping.get(item_type, self.default_zone) 
+                # 蛋糕固定 A -> 分类板映射 -> 按物品兜底（不会把 10 块全塞进一个区）
+                drop_zone = choose_drop_zone(
+                    item_type, self.mapping, self.fallback_zones,
+                    cake_id=self.CAKE_ID, cake_zone="Collection_A",
+                    default_zone=self.default_zone)
+                if item_type != self.CAKE_ID and not (self.mapping or {}).get(item_type):
+                    rospy.logwarn("分类板映射里没有物品 %s，使用兜底区 %s（本场分类板可能没识别出来）",
+                                  item_type, drop_zone)
             
             if total_drop_times != 9:
                 print("========向后退一点===== ")
@@ -965,16 +989,39 @@ class AutoAction:
         rospy.logwarn("Re-send a message to hm_task_cmd topic. ")
         rospy.logwarn("Or press Ctrl+C to exit the program")
         
-    def _load_fallback_zone(self):
-        '''读取兜底放置区（分类板识别失败时使用）。'''
+    def _load_task_config(self):
+        '''
+        读取调度参数：兜底放置区、按物品的兜底分区、时间预算。
+        这些都放在 items_config.yaml 的 task 段，改参数不用改代码。
+        '''
+        cfg = {
+            'default_zone': 'Collection_B',
+            'fallback_zones': {},
+            'time_budget_s': 540.0,
+            'min_remaining_s': 90.0,
+        }
         try:
             path = os.path.join(rospkg.RosPack().get_path('auto_match'), 'config', 'items_config.yaml')
             with open(path, 'r', encoding='utf8') as f:
                 content = yaml.load(f.read(), Loader=yaml.FullLoader) or {}
-            return str(content.get('board_fallback_zone', 'Collection_B'))
         except Exception as exc:
-            rospy.logwarn(f"读取兜底放置区失败({exc})，使用 Collection_B")
-            return 'Collection_B'
+            rospy.logwarn(f"读取 task 配置失败({exc})，使用默认值")
+            return cfg
+
+        cfg['default_zone'] = str(content.get('board_fallback_zone', 'Collection_B'))
+        task = content.get('task') or {}
+        cfg['time_budget_s'] = float(task.get('time_budget_s', 540.0))
+        cfg['min_remaining_s'] = float(task.get('min_remaining_s', 90.0))
+
+        # 按物品名配置的兜底区 -> 转成 ID
+        items = content.get('items') or {}
+        by_name = task.get('fallback_by_name') or {}
+        for name, zone in by_name.items():
+            if name in items:
+                cfg['fallback_zones'][int(items[name])] = str(zone)
+            else:
+                rospy.logwarn(f"task.fallback_by_name 里的类别 {name!r} 不在 items 段，已忽略")
+        return cfg
 
     def wait_board_mapping(self):
         '''
