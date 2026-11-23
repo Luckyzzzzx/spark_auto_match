@@ -29,6 +29,18 @@
   实机自检从「缺少 `['cake']`」变为「自检通过: wine/cake/banana/bear/clock」。
 - 实机（170.0）加载结果：`models=[yolov5(7类), ultralytics(41类), ultralytics(1类)]`。
 
+### 追加（同日）· 两台机器人的分工与 1 号机补齐
+- 约定：**1 号机 = 10.24.170.0（主用）**，**2 号机 = 10.25.141.8（副机）**。
+- 1 号机原本缺 B/D 组整条链（`nav_manager`/`nav_route`/导航配置/preflight/测试/文档），
+  已从仓库统一部署补齐（不是从 2 号机互拷，避免把 2 号的点位带过去）。
+- **未覆盖** 1 号机自己的 `config/mark_map.pkl`（14 个点，含 `Collection_A`）与 `test_map.*`。
+- 1 号机 14 个历史遗留脚本（`runtask818.py`、`runtask (copy).py` 等）已移到
+  `~/legacy_auto_match_nodes_20261123/`。
+- `scripts/robot_preflight.py` 改为环境无关：支持 `detect.models` 清单、
+  按「环境变量 → `~/yolo_venv` → 系统 python3」选择解释器，缺模型只告警不报错。
+- 实机结果（1 号机）：`--mode vision` 与 `--mode full` **均通过**，
+  可用模型 3 个，点位 14 个。
+
 ## 2026-11-19 · 自动组（B 导航 / D 调度）
 
 ### 修复

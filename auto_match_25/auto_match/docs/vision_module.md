@@ -52,6 +52,27 @@ detect:
 [INFO] detect_ros 就绪: models=[yolov5(7类), ultralytics(41类), ultralytics(1类)]
 ```
 
+## 0.2 两台机器人（2026-11-23 约定）
+
+| | **1 号机** | **2 号机** |
+| --- | --- | --- |
+| IP | `10.24.170.0` | `10.25.141.8` |
+| 角色 | 主用/比赛 | 副机/训练与调参 |
+| 系统 python3 | ultralytics 8.0.143 + yolov5 7.0.13 + torch 2.0.1（CPU） | 只有 ROS 基础包，**没有**推理库 |
+| `~/yolo_venv` | 无（回退系统 python3） | 有（1.6G，ultralytics 8.4.215 + yolov5 7.0.13） |
+| 物品模型 | `~/auto.pt`、`~/banana.pt`（自训练 YOLOv5） | 无，只有 `~/yolov8n.pt`（COCO） |
+| 蛋糕模型 | `~/cake_dataset_v4_20261122/runs/cake_v4/weights/best.pt` | `~/cake_v4_best.pt`、`~/cake_best.pt` |
+| 部署路径 | `~/spark_noetic/src/3rd_app/auto_match_25/auto_match` | 同（各自独立） |
+| 点位文件 | 自己的 `config/mark_map.pkl`（14 个点，含 `Collection_A`） | 自己的 `config/mark_map.yaml`（14 个点） |
+
+**迁移注意（2026-11-23 已执行）**：
+
+* 代码统一从仓库部署（不要在两台机器间互拷 `nodes/`，会把对方的点位/参数带过去）；
+* **不要覆盖** `config/mark_map.*`、`config/test_map.*` —— 每台机器的地图与点位是各自标定的；
+* 1 号机已补齐 2 号机原有的 B/D 组基础设施：`nav_manager.py`、`nav_route.py`、
+  `nav_params.yaml`、`route_table.yaml`、`robot_preflight.py`、`route_report.py`、`pkl2yaml.py`、
+  `test/`、`docs/`，以及 14 个历史遗留脚本已移到 `~/legacy_auto_match_nodes_20261123/`。
+
 ## 1. 文件与职责
 
 | 文件 | 状态 | 说明 |
