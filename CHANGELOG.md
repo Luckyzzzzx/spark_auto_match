@@ -1,5 +1,27 @@
 # 变更日志
 
+## 2026-11-23 · D组（调度）· 兜底分区 + 时间预算
+
+### 背景
+两个会直接丢分的场景：
+1. 分类板没识别出来时，原来所有物品都落到 `board_fallback_zone`（B 区）→ 10 块全堆一处；
+2. 10 分钟到了还在抓 → 规则「超时放置不得分」且每秒扣 2 分。
+
+### 改动
+- 新增 `nodes/task_rules.py`（纯逻辑，不 import rospy）：
+  `choose_drop_zone` / `mapping_is_usable` / `remaining_seconds` / `should_stop`。
+- `runtask.py`：
+  - 放置区判定改为 `蛋糕→A → 分类板映射 → 按物品兜底 → 全局兜底`，
+    映射缺失时按 `task.fallback_by_name` **分散**到 B/C/D，并打 warn；
+  - `run_task()` 开始时记录 `task_deadline`，每轮循环检查剩余时间，
+    不足 `min_remaining_s` 就停止新抓取（收臂结束）。
+- `items_config.yaml` 新增 `task:` 段（`time_budget_s: 540`、`min_remaining_s: 90`、`fallback_by_name`）。
+- 新增 `test/test_task_rules.py`（14 个用例）与 `docs/task_rules.md`。
+
+### 验证
+- 单测 40 → **54 个全过**（本地 + 1 号机）；
+- 1 号机 `python3 -m py_compile` 通过、`robot_preflight.py --mode full` 通过。
+
 ## 2026-11-23 · A组（视觉）· 按机器人实测环境修正
 
 ### 背景（`10.24.170.0` 巡检结论）

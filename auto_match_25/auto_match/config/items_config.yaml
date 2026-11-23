@@ -136,3 +136,20 @@ board:
 
 # 分类板识别失败/超时时的兜底放置区（只对 B/C/D 三类有意义，蛋糕永远走 A）
 board_fallback_zone: Collection_B
+
+# =========================== 任务调度 ===========================
+# 负责人：D（调度）  由 runtask.py::_load_task_config 读取
+task:
+  # 规则：正式比赛 10 分钟，超时放置的金砖不得分，且超时每秒扣 2 分。
+  # 540s = 9 分钟，给收尾（收臂/停车）留 1 分钟。
+  time_budget_s: 540
+
+  # 剩余时间不足这么多秒就停止**新的**抓取（一轮导航+抓取+放置大约 60~90s）
+  min_remaining_s: 90
+
+  # 分类板没识别出来时，按物品分散兜底，避免 10 块金砖全堆进 B 区
+  fallback_by_name:
+    bear: Collection_B
+    wine: Collection_C
+    clock: Collection_C
+    banana: Collection_D
