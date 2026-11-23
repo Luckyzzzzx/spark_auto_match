@@ -36,7 +36,13 @@ if NODE_DIR not in sys.path:
 from nav_manager import NavigationManager
 from task_rules import choose_drop_zone, remaining_seconds, should_stop
 # 堆叠安全运动：分段抬升 / 外侧接近 / IK 自检（见 arm_stack.py 顶部注释）
-from arm_stack import StackMotion, load_config as load_stack_config, layer_z_for
+from arm_stack import (StackMotion, load_config as load_stack_config, layer_z_for,
+                       ik_reachable)
+# 吸盘视觉对准：线性映射只做粗定位，最后靠吸盘像素闭环收敛（见 arm_servo.py）
+from arm_servo import CupServo
+
+# 吸盘要压的是砖的"顶面中心"；检测框是顶面+正面的并集，框中心偏低 0.25*框高
+TOP_FACE_FRAC = 0.25
 
 class SwiftProInterface:
     def __init__(self):
@@ -154,7 +160,8 @@ class CamAction:
             if obj_id in allowed:
                 x = obj.bbox.center.x
                 y = obj.bbox.center.y
-                cube_list.append([obj_id, [x, y, 0]])  # ֱ�����ӵ��б�
+                # 第三个元素存框高，抓取时用它换算出顶面中心
+                cube_list.append([obj_id, [x, y, obj.bbox.size_y]])
           
             
         # 筛选出需要的物品 cube_list中的key代表识别物体的ID，value代表位置信息
@@ -204,6 +211,8 @@ class ArmAction:
             stack_cfg_path = None
         self.stack_cfg = load_stack_config(stack_cfg_path, log=rospy.loginfo)
         self.stack = StackMotion(self.interface, self.stack_cfg, log=rospy.logwarn)
+        # 吸盘视觉对准（最后的闭环微调）
+        self.servo = CupServo()
         # 每个放置区最近一次放置的机械臂坐标（叠塔时用于挑"塔顶那块"）
         self.drop_xy = {}
         rospy.loginfo("堆叠动作: enabled=%s 每段%.0fmm/停%.2fs 抓后抬升%.0fmm 层高表=%s",
@@ -241,22 +250,49 @@ class ArmAction:
 
         rospy.loginfo(f"排序后列表: {cube_list}")
 
-        target = cube_list[0]
-        x = self.x_kb[0] * target[1][1] + self.x_kb[1]  # ͼ��x �� ��е��x
-        y = self.y_kb[0] * target[1][0] + self.y_kb[1]  # ͼ��y �� ��е��y
-        z = -55  # �̶�ץȡ�߶�
+        # 从近到远挑第一块"抓取高度真的够得着"的砖。
+        # 固件遇到不可达位姿会静默不动，不检查就会白吸一次、砖原地不动。
+        # 同时排除已经叠成塔的那块：当场地上塔和待抓砖同时在视野里时，
+        # 否则会把塔顶那块又抓起来。
+        towers = [xy for xy in self.drop_xy.values()]
+        target = None
+        for item in cube_list:
+            tx = self.x_kb[0] * item[1][1] + self.x_kb[1]
+            ty = self.y_kb[0] * item[1][0] + self.y_kb[1]
+            if any(math.hypot(tx - px, ty - py) < 110.0 for px, py in towers):
+                rospy.loginfo("金砖 id=%s 在 (%.0f, %.0f)，是已叠的塔，跳过", item[0], tx, ty)
+                continue
+            if ik_reachable(tx, ty, z) and ik_reachable(tx, ty, z + 20):
+                target = item
+                break
+            rospy.logwarn("金砖 id=%s 在 (%.0f, %.0f) 抓取高度 z=%.0f 不可达，跳过"
+                          "（离底座太近或太远）", item[0], tx, ty, z)
+        if target is None:
+            rospy.logwarn("视野里没有够得着的金砖")
+            self.grasp_status_pub.publish(String("1"))
+            return 0
+
+        x = self.x_kb[0] * target[1][1] + self.x_kb[1]  # 图像y -> 机械臂x
+        y = self.y_kb[0] * target[1][0] + self.y_kb[1]  # 图像x -> 机械臂y
+        z = -55  # 固定抓取高度
 
         print(f"找到物品了！它在: {x}, {y}, {z}")
 
+        # 机械臂移到目标上方，然后闭环对准砖的顶面中心
+        # （线性映射只负责把吸盘送到附近，最后几毫米靠吸盘像素收敛）
+        self.interface.set_pose(x, y, z + 30)
+        rospy.sleep(0.8)
+        tgt_u = target[1][0]
+        tgt_v = target[1][1] - TOP_FACE_FRAC * (target[1][2] or 0.0)
+        x, y, aligned = self.servo.align(
+            self.interface, (tgt_u, tgt_v), x, y, z + 30,
+            (self.x_kb[0], self.y_kb[0]), log=rospy.loginfo)
+        if not aligned:
+            rospy.logwarn("grasp: 视觉对准未收敛，按当前位姿继续 (x=%.1f, y=%.1f)", x, y)
+
         # 打开气泵，进行吸取
-
-
-        # 机械臂移动到目标位置上方
-        self.interface.set_pose(x, y, z + 20)
-        rospy.sleep(1)
-
         self.interface.set_pump(True)
-        rospy.sleep(1)
+        rospy.sleep(0.8)
         # 机械臂移动到目标位置
         self.interface.set_pose(x, y, z)
         rospy.sleep(1)
@@ -298,24 +334,41 @@ class ArmAction:
 
         rospy.loginfo(f"排序后列表: {cube_list}")
 
-        target = cube_list[0]
-        x = self.x_kb1[0] * target[1][1] + self.x_kb1[1]  # ͼ��x �� ��е��x
-        y = self.y_kb1[0] * target[1][0] + self.y_kb1[1]  # ͼ��y �� ��е��y
-        z = 45  # �̶�ץȡ�߶�
+        # 同 grasp()：跳过抓取高度不可达的目标（固件会静默不动）
+        target = None
+        for item in cube_list:
+            tx = self.x_kb1[0] * item[1][1] + self.x_kb1[1]
+            ty = self.y_kb1[0] * item[1][0] + self.y_kb1[1]
+            if ik_reachable(tx, ty, z) and ik_reachable(tx, ty, z + 20):
+                target = item
+                break
+            rospy.logwarn("二层金砖 id=%s 在 (%.0f, %.0f) z=%.0f 不可达，跳过",
+                          item[0], tx, ty, z)
+        if target is None:
+            rospy.logwarn("视野里没有够得着的二层金砖")
+            self.grasp_status_pub.publish(String("1"))
+            return 0
+
+        x = self.x_kb1[0] * target[1][1] + self.x_kb1[1]  # 图像y -> 机械臂x
+        y = self.y_kb1[0] * target[1][0] + self.y_kb1[1]  # 图像x -> 机械臂y
+        z = 45  # 固定抓取高度
 
         print(f"找到物品了！它在: {x}, {y}, {z}")
 
+        # 同上：先到目标上方，再用吸盘像素闭环对准顶面中心
+        self.interface.set_pose(x, y, z + 30)
+        rospy.sleep(0.8)
+        tgt_u = target[1][0]
+        tgt_v = target[1][1] - TOP_FACE_FRAC * (target[1][2] or 0.0)
+        x, y, aligned = self.servo.align(
+            self.interface, (tgt_u, tgt_v), x, y, z + 30,
+            (self.x_kb1[0], self.y_kb1[0]), log=rospy.loginfo)
+        if not aligned:
+            rospy.logwarn("grasp1: 视觉对准未收敛，按当前位姿继续 (x=%.1f, y=%.1f)", x, y)
 
-
-
-        # 机械臂移动到目标位置上方
-        self.interface.set_pose(x, y, z + 20)
-        rospy.sleep(1)
-
-                # 打开气泵，进行吸取
+        # 打开气泵，进行吸取
         self.interface.set_pump(True)
-        rospy.sleep(1)
-
+        rospy.sleep(0.8)
 
         # 机械臂移动到目标位置
         self.interface.set_pose(x, y, z)
@@ -570,6 +623,10 @@ class ArmAction:
         选放置点。
         叠塔时视野里可能同时有几个框（塔顶那块 + 旁边已放好的），原来直接取
         cube_list[0] 是随机的。这里优先取"离本区上一次放置点最近"的框。
+
+        叠第二/三层时以**记录点为准**：那是机械臂自己的指令坐标，精确到毫米级；
+        视觉换算（像素->臂）有 10~30mm 残差，用它定位会让每层越叠越歪。
+        检测只在"离记录点不远"时用来确认塔还在，否则只告警、仍用记录点。
         '''
         ref = self.drop_xy.get(zone) if zone else None
         if not candidates:
@@ -578,13 +635,15 @@ class ArmAction:
                 return ref
             rospy.logwarn("%s: 未识别到金砖，回退到固定点 (%.1f, %.1f)", tag, fallback[0], fallback[1])
             return fallback
+        best = min(candidates,
+                   key=lambda xy: (xy[0] - ref[0]) ** 2 + (xy[1] - ref[1]) ** 2) if ref else candidates[0]
         if ref is None:
-            return candidates[0]
-        best = min(candidates, key=lambda xy: (xy[0] - ref[0]) ** 2 + (xy[1] - ref[1]) ** 2)
+            return best
         moved = math.hypot(best[0] - ref[0], best[1] - ref[1])
-        if moved > 120.0:
-            rospy.logwarn("%s: 最近的框离上次放置点 %.0fmm，可能认到别的金砖了，仍按它放", tag, moved)
-        return best
+        if moved > 40.0:
+            rospy.logwarn("%s: 最近的框离记录塔位 %.0fmm（视觉换算误差或塔被碰过），"
+                          "仍按记录点 (%.1f, %.1f) 放置", tag, moved, ref[0], ref[1])
+        return ref
 
     def _place(self, zone, layer, x, y, z, tag):
         '''

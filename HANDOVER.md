@@ -107,6 +107,10 @@ rostopic pub -1 /position_write_topic swiftpro/position "{x: 130, y: 0, z: 35}"
 
 ## 五、手眼标定（关键）
 
+> ⚠️ **标定值已固定，正常工作勿改！** 当前值是在机器人 10.24.170.0 上实测验证过的，
+> 抓取准确。**除非重新示教标定，否则绝对不要修改 `~/thefile.txt` 和 `~/thefile2.txt`。**
+> 新会话若"抓空"，先检查这两个文件是否被改（当前值见下表）。
+
 **文件**：`~/thefile.txt`（一层）、`~/thefile2.txt`（二层），格式 `x_kb[0] x_kb[1] y_kb[0] y_kb[1]`
 
 | 层 | 当前值 | 状态 |
