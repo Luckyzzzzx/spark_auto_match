@@ -34,7 +34,15 @@ import rospkg
 import yaml
 from vision_msgs.msg import Detection2DArray
 
-from board_mapping import (find_duplicate_ids, gap_uniform_ratio,
+# 本脚本在 scripts/，而 board_mapping.py 在 nodes/；
+# catkin 的 devel 包装器和 rosrun 都不会自动加上 nodes/，这里显式补上。
+_SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+_NODES_DIR = os.path.normpath(os.path.join(_SCRIPT_DIR, os.pardir, "nodes"))
+for _p in (_NODES_DIR, _SCRIPT_DIR):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from board_mapping import (find_duplicate_ids, gap_uniform_ratio,  # noqa: E402
                            normalize_detections, size_uniform_ratio)
 
 CONFIG_REL = os.path.join("config", "items_config.yaml")
